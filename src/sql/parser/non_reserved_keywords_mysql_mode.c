@@ -957,6 +957,11 @@ static const NonReservedKeyword Mysql_none_reserved_keywords[] =
   {"api_mode", API_MODE},
   {"INCONSISTENT", INCONSISTENT},
   {"INDIVIDUAL", INDIVIDUAL},
+  {"read_csv", READ_CSV},
+  {"read_json", READ_JSON},
+  {"read_ndjson", READ_NDJSON},
+  {"read_parquet", READ_PARQUET},
+  {"glob", FILE_GLOB},
   {"hybrid_search", HYBRID_SEARCH},
 };
 
