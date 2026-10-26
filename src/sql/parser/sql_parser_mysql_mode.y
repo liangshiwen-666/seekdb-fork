@@ -293,7 +293,7 @@ END_P SET_VAR DELIMITER
         GENERAL GEOMETRY GEOMCOLLECTION GEOMETRYCOLLECTION GET_FORMAT GLOBAL GRANTS GROUP_CONCAT GROUPING
         GLOBAL_ALIAS
 
-        HASH HEAP HELP HISTOGRAM HOUR HIDDEN HYBRID HYBRID_HIST HYBRID_SEARCH READ_CSV READ_JSON READ_NDJSON READ_PARQUET FILE_GLOB
+        HASH HEAP HELP HISTOGRAM HOUR HIDDEN HYBRID HYBRID_HIST HYBRID_SEARCH AI_COLUMN_RETRY READ_CSV READ_JSON READ_NDJSON READ_PARQUET FILE_GLOB
 
         IDENTIFIED IK_MODE ILOG IMMEDIATE IMPORT INCLUDING INCR INDEXES INFO
         INNODB INPLACE INSERT_METHOD INSTANT INSTANCE INVOKER IO IO_THREAD IPC ISOLATE ISOLATION ISSUER
@@ -406,6 +406,8 @@ END_P SET_VAR DELIMITER
 %type <node> opt_limit_clause limit_expr opt_lock_type opt_for_update opt_for_update_wait opt_lock_in_share_mode
 %type <node> sort_list sort_key opt_asc_desc sort_list_for_group_by sort_key_for_group_by opt_asc_desc_for_group_by sort_list_opt_null sort_key_opt_null opt_asc_desc_null
 %type <node> opt_query_expression_option_list query_expression_option_list query_expression_option opt_distinct opt_distinct_or_all opt_separator projection
+%type <node> ai_retry_predicate
+%type <node> ai_column_options
 %type <node> file_copy_stmt file_copy_options file_copy_option_list file_copy_option file_copy_value file_function_name file_table_expr from_list table_references table_reference table_factor normal_relation_factor dot_relation_factor relation_factor
 %type <node> relation_factor_in_hint relation_factor_in_hint_list relation_factor_in_pq_hint opt_relation_factor_in_hint_list relation_factor_in_use_join_hint_list
 %type <node> relation_factor_in_leading_hint_list joined_table tbl_name table_subquery table_subquery_alias
@@ -6140,8 +6142,19 @@ column_attribute_list column_attribute
   $$ = $1;
 }
 
+ai_column_options:
+/* EMPTY */ { $$ = NULL; }
+| WITH '(' expr_list ')' { $$ = $3; }
+;
+
 column_attribute:
-not NULLX
+AI COLUMN '(' expr ')' ai_column_options
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_DEFINITION, 2, $4, $6);
+  dup_expr_string($$, result, @4.first_column, @4.last_column);
+  $$->is_tree_not_param_ = true;
+}
+| not NULLX
 {
   (void)($1) ;
   (void)($2) ; /* make bison mute */
@@ -12631,7 +12644,12 @@ CLASS_ORIGIN
  *
  *****************************************************************************/
 show_stmt:
-SHOW opt_extended_or_full TABLES opt_from_or_in_database_clause opt_show_condition
+SHOW AI COLUMNS from_or_in relation_factor
+{
+  (void)$4;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_AI_COLUMNS, 1, $5);
+}
+| SHOW opt_extended_or_full TABLES opt_from_or_in_database_clause opt_show_condition
 {
   ParseNode *value = NULL;
   malloc_terminal_node(value, result->malloc_pool_, T_INT);
@@ -14697,8 +14715,22 @@ alter_table_action
 }
 ;
 
+ai_retry_predicate:
+/* EMPTY */ { $$ = NULL; }
+| WHERE expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_WHERE_CLAUSE, 1, $2);
+  dup_expr_string($$, result, @2.first_column, @2.last_column);
+}
+;
+
 alter_table_action:
-opt_set table_option_list_space_seperated
+AI_COLUMN_RETRY AI COLUMN column_name ai_retry_predicate
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_RETRY_AI_COLUMN, 2, $4, $5);
+  $$->is_tree_not_param_ = true;
+}
+| opt_set table_option_list_space_seperated
 {
   (void)$1;
   merge_nodes($$, result, T_TABLE_OPTION_LIST, $2);
@@ -17617,7 +17649,8 @@ unreserved_keyword_normal { $$=$1;}
 ;
 
 unreserved_keyword_normal:
-ACCOUNT
+AI_COLUMN_RETRY
+| ACCOUNT
 |       ACTION
 |       ACTIVE
 |       ADDDATE
