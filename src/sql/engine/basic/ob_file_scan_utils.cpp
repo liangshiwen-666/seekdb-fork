@@ -206,8 +206,10 @@ public:
     }
     return static_cast<unsigned char>(buffer_[pos_++]);
   }
-  void reset() { require(::lseek(fd_, 0, SEEK_SET) == 0, "file_sql: cannot rewind file"); pos_ = size_ = 0; line_ = 1; first_ = true; }
+  void reset() { require(::lseek(fd_, 0, SEEK_SET) == 0, "file_sql: cannot rewind file"); pos_ = size_ = 0; line_ = 1; record_line_ = 1; first_ = true; }
   uint64_t line_ = 1;
+  // First physical line of the record currently being parsed (for diagnostics).
+  uint64_t record_line_ = 1;
 private:
   int fd_;
   char buffer_[64 * 1024];
@@ -218,6 +220,7 @@ private:
 bool csv_row(Input &in, const Options &options, std::vector<Cell> &row)
 {
   for (;;) {
+    in.record_line_ = in.line_;
     row.clear();
     std::string value;
     bool quoted = false, in_quote = false, closed = false, started = false;
@@ -235,7 +238,18 @@ bool csv_row(Input &in, const Options &options, std::vector<Cell> &row)
     int c;
     while ((c = in.get()) >= 0) {
       require(++bytes <= MAX_ROW, "file_sql: CSV record exceeds 4 MiB at line " + std::to_string(in.line_));
-      if (c == '\r') { int next = in.get(); require(next == '\n' || next == -1, "file_sql: bare CR in CSV"); c = '\n'; }
+      if (c == '\r') {
+        const int next = in.get();
+        if (next == '\n' || next == -1) {
+          c = '\n';  // CRLF (and a trailing CR at EOF) terminate the line; normalise to LF.
+        } else if (in_quote) {
+          // A bare CR belongs to the quoted value; keep it and reprocess the next byte.
+          value.push_back('\r');
+          c = next;
+        } else {
+          require(false, "file_sql: bare CR in CSV");
+        }
+      }
       if (c == '\n') ++in.line_;
       if (in_quote) {
         if (options.escape && options.escape != options.quote && c == options.escape) {
@@ -289,11 +303,19 @@ bool json_row(Input &input, ObjectRow &row)
     if (line.find_first_not_of(" \t\r") == std::string::npos) { if (c < 0) return false; else continue; }
     rapidjson::Document document;
     document.Parse<rapidjson::kParseValidateEncodingFlag | rapidjson::kParseFullPrecisionFlag>(line.data(), line.size());
+    // Parse a second time with number tokens kept as strings so integers keep
+    // their exact decimal text (RapidJSON would otherwise round out-of-range
+    // integers through double, breaking the documented VARCHAR boundary rule).
+    rapidjson::Document raw;
+    raw.Parse<rapidjson::kParseValidateEncodingFlag | rapidjson::kParseFullPrecisionFlag
+              | rapidjson::kParseNumbersAsStringsFlag>(line.data(), line.size());
     std::string where = " at JSONL line " + std::to_string(number);
-    require(!document.HasParseError() && document.IsObject(), "file_sql: expected a flat JSON object" + where);
+    require(!document.HasParseError() && document.IsObject() && !raw.HasParseError() && raw.IsObject(),
+            "file_sql: expected a flat JSON object" + where);
     row.clear();
     std::set<std::string> names;
-    for (auto member = document.MemberBegin(); member != document.MemberEnd(); ++member) {
+    auto raw_member = raw.MemberBegin();
+    for (auto member = document.MemberBegin(); member != document.MemberEnd(); ++member, ++raw_member) {
       require(row.size() < MAX_COLUMNS, "file_sql: too many JSON fields" + where);
       std::string name(member->name.GetString(), member->name.GetStringLength());
       require(!name.empty() && names.insert(lower(name)).second, "file_sql: duplicate or empty JSON field" + where);
@@ -307,10 +329,9 @@ bool json_row(Input &input, ObjectRow &row)
       } else if (v.IsBool()) {
         cell.text = v.GetBool() ? "true" : "false"; cell.type = Type::Boolean;
       } else if (v.IsNumber()) {
-        rapidjson::StringBuffer buffer;
-        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-        v.Accept(writer);
-        cell.text.assign(buffer.GetString(), buffer.GetSize());
+        require(raw_member != raw.MemberEnd() && raw_member->value.IsString(),
+                "file_sql: cannot preserve JSON number text" + where);
+        cell.text.assign(raw_member->value.GetString(), raw_member->value.GetStringLength());
         cell.type = infer_type(cell.text);
       } else require(v.IsNull(), "file_sql: nested JSON objects and arrays are not supported" + where);
       row.emplace_back(std::move(name), std::move(cell));
@@ -531,7 +552,7 @@ Definition infer(const std::string &path, const std::string &secure_root, const 
         first = false;
         if (options.header) continue;
       }
-      require(row.size() == result.columns.size(), "file_sql: CSV column count mismatch at line " + std::to_string(input.line_));
+      require(row.size() == result.columns.size(), "file_sql: CSV column count mismatch at line " + std::to_string(input.record_line_));
       for (size_t i = 0; i < row.size(); ++i) {
         result.columns[i].type = widen(result.columns[i].type, row[i].type);
         result.columns[i].nullable |= row[i].is_null;
@@ -584,6 +605,11 @@ public:
   {
     watch_.check();
     require(stamp_fd(fd_.value) == definition_.stamp, "file_sql: input changed since schema inference: " + definition_.path);
+    // Re-validating the canonical path requires one openat walk per component;
+    // doing that for every row is too expensive for large inputs. The open fd,
+    // its stamp and the inotify watch cover in-place writes and path replacement
+    // (MOVE_SELF/DELETE_SELF), so re-check the path only periodically.
+    if ((++checks_ & 0xfff) != 0) return;
     std::string path;
     Fd current(secure_open(definition_.source_path.empty() ? definition_.path : definition_.source_path, root_, path));
     require(stamp_fd(current.value) == definition_.stamp, "file_sql: input path replaced during scan");
@@ -607,7 +633,10 @@ public:
   bool next(std::vector<Cell> &out)
   {
     if (definition_.options.format == Format::Glob) {
-      if (position_ == paths_.size()) return false;
+      if (position_ == paths_.size()) {
+        require(position_ == definition_.rows, "file_sql: glob result changed since schema inference");
+        return false;
+      }
       out.clear();
       if (!projection_.empty()) out.push_back({false, paths_[position_], Type::Varchar});
       ++position_; return true;
@@ -618,7 +647,8 @@ public:
     std::vector<Cell> row;
     if (definition_.options.format == Format::Csv) {
       available = csv_row(*input_, definition_.options, row);
-      if (available) require(row.size() == definition_.columns.size(), "file_sql: CSV field count changed");
+      if (available) require(row.size() == definition_.columns.size(),
+                             "file_sql: CSV field count changed at line " + std::to_string(input_->record_line_));
     } else {
       ObjectRow members;
       available = json_row(*input_, members);
@@ -646,6 +676,7 @@ public:
   std::unique_ptr<ParquetScan> parquet_;
   std::vector<std::string> paths_;
   uint64_t position_ = 0;
+  uint64_t checks_ = 0;
 };
 
 Scan::Scan(const Definition &d, const std::string &root, const std::vector<size_t> &projection)
