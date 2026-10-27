@@ -40,10 +40,13 @@ int ObFunctionTableOp::inner_open()
   already_calc_ = false;
   if (OB_ISNULL(MY_SPEC.value_expr_)) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (MY_SPEC.value_expr_->datum_meta_.type_ == ObVarcharType) {
+  } else if (MY_SPEC.value_expr_->datum_meta_.type_ == ObVarcharType && !MY_SPEC.has_correlated_expr_) {
+    // File table functions carry their schema descriptor in a constant VARCHAR
+    // expression. Correlated (PL) function tables must not be probed here: their
+    // value expression is not evaluable before the first row is requested.
     ObDatum *datum = nullptr;
     if (OB_FAIL(MY_SPEC.value_expr_->eval(eval_ctx_, datum))) {
-    } else if (datum != nullptr && !datum->is_null()
+    } else if (datum != nullptr && datum->ptr_ != nullptr && !datum->is_null()
                && file_sql::Definition::is_descriptor(datum->ptr_, datum->len_)) {
       std::string root;
       if (OB_SUCC(check_file_sql_access(ctx_.get_my_session(), root))) {
