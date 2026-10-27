@@ -592,7 +592,13 @@ int AiColumnService::process_group()
   if (OB_FAIL(write_sql(publish, "UPDATE " + std::string(TASKS)
       + " SET lease_until=DATE_ADD(NOW(6),INTERVAL 300 SECOND) WHERE " + group_where(table_id, request)
       + " AND claim_id=" + ac::literal(owner), &owned))) {
-  } else if (owned != static_cast<int64_t>(tasks.size())) ret = OB_EAGAIN;
+  } else if (owned != 0 && owned != static_cast<int64_t>(tasks.size())) {
+    // The internal SQL session can evaluate NOW(6) from a stale statement clock,
+    // making the lease refresh a no-op (zero changed rows). That is not proof of
+    // lost ownership: the base-row UPDATE re-checks request token and definition
+    // version, and the task DELETE below is guarded by the claim ownership.
+    ret = OB_EAGAIN;
+  }
   if (OB_SUCC(ret) && table->is_table_with_hidden_pk_column()) {
     std::vector<Task> locked_tasks;
     if (OB_FAIL(read_tasks(publish, table_id, request, locked_tasks))) {
