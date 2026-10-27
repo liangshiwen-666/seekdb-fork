@@ -1,0 +1,54 @@
+# owner: liangshiwen
+# owner group: storage
+# description: regression for fulltext index build and MATCH after tokenizer hot path changes
+
+--disable_warnings
+drop database if exists fts_hot_path;
+create database fts_hot_path;
+use fts_hot_path;
+set ob_query_timeout = 10000000000;
+--enable_warnings
+
+--result_format 4
+
+create table docs(
+  id int primary key,
+  title varchar(200),
+  content text,
+  title_en varchar(256));
+
+insert into docs values
+(1, '数据库性能优化实践', '全文索引的分词器热路径优化包括解析器实例复用、停用词全局单例、内存池化数据结构等技术。', 'Database performance optimization'),
+(2, '全文索引分词器热路径分析', '在大量文档索引场景下，ik 分词需要频繁查词典和判断停用词，CPU 开销主要集中在分词热路径。', 'Full-text search indexing benchmark'),
+(3, 'OceanBase 稳定性的工程经验', 'OceanBase 是一款非常稳定的数据库，支持 ik、beng、space、ngram 等多种内置分词器。', 'Query latency under heavy load'),
+(4, '倒排索引与检索系统设计', '倒排索引是全文检索的核心数据结构，分词质量直接影响召回率、准确率和查询延迟。', 'Inverted index build performance'),
+(5, '中文分词词典加载机制', '中华人民共和国人民大会堂是著名地标，本文用于测试中文 smart 与 max_word 分词差异。', 'English tokenizer beng parser test'),
+(6, '全文索引 test row', 'tokenizer 数据库 全文索引 混合文本 row=6', 'database performance audit');
+
+# index build goes through the tokenizer hot path
+alter table docs add fulltext index fti_ik(title, content) with parser ik;
+alter table docs add fulltext index fti_en(title_en) with parser beng;
+
+select count(*) from docs where match(title, content) against('全文索引 分词器');
+select count(*) from docs where match(title, content) against('数据库');
+select count(*) from docs where match(title, content) against('不存在词xyz');
+select id from docs where match(title, content) against('数据库') order by id;
+
+select count(*) from docs where match(title_en) against('database performance');
+select id from docs where match(title_en) against('database') order by id;
+
+# update re-indexes the row through the same tokenizer
+update docs set content = '仅包含数据库关键字' where id = 6;
+select count(*) from docs where match(title, content) against('tokenizer');
+select id from docs where match(title, content) against('数据库') order by id;
+
+# delete removes the indexed row
+delete from docs where id = 6;
+select count(*) from docs where match(title, content) against('数据库');
+select id from docs where match(title, content) against('数据库') order by id;
+
+--disable_warnings
+drop table if exists docs;
+--enable_warnings
+
+drop database fts_hot_path;

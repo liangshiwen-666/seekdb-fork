@@ -71,6 +71,8 @@ private:
     mutable ObArenaAllocator allocator_;
     ObString parser_name_;
     ObString properties_;
+    // already parsed/validated parser property, avoids a json round trip
+    storage::ObFTParserProperty parser_property_;
     ObObjMeta meta_;
     ObString fulltext_;
     enum OUTPUT_MODE
