@@ -26,6 +26,7 @@
 #include "sql/engine/px/ob_px_sqc_handler.h"
 #include "sql/engine/expr/ob_expr_json_func_helper.h"
 #include "common/udt/ob_collection_type.h"
+#include "common/timezone/ob_time_convert.h"
 #include "share/config/ob_server_config.h"
 #include "share/ob_lob_access_utils.h"
 
@@ -231,7 +232,24 @@ int ObSelectIntoOp::write_file_copy(bool batch)
             }
             if (state != TEXTSTRING_ITER_END) return OB_ERR_UNEXPECTED;
           } else if (object.is_string_type()) cell.text.assign(object.get_string_ptr(), object.get_string_len());
-          else {
+          else if (ObDateTimeType == object.get_type()
+                   || ObTimestampType == object.get_type()
+                   || ObMySQLDateTimeType == object.get_type()) {
+            // print_plain_str_literal() always renders OB_MAX_DATETIME_PRECISION
+            // fractional digits for temporal values. Print with the column scale so
+            // the exported text keeps the value's own precision and read_csv infers
+            // the same DATETIME scale back.
+            int64_t pos = 0;
+            int16_t scale = object.get_scale();
+            const ObTimeZoneInfo *tz_info = ObTimestampType == object.get_type() ? print.tz_info_ : NULL;
+            if (scale < 0) scale = 0;
+            if (ObMySQLDateTimeType == object.get_type()) {
+              if (OB_SUCCESS != (result = ObTimeConverter::mdatetime_to_str(object.get_mysql_datetime(),
+                    tz_info, scale, buffer.data(), buffer.size(), pos))) return result;
+            } else if (OB_SUCCESS != (result = ObTimeConverter::datetime_to_str(object.get_datetime(),
+                           tz_info, scale, buffer.data(), buffer.size(), pos))) return result;
+            cell.text.assign(buffer.data(), pos);
+          } else {
             int64_t pos = 0;
             if (OB_SUCCESS != (result = object.print_plain_str_literal(buffer.data(), buffer.size(), pos, print))) return result;
             cell.text.assign(buffer.data(), pos);
