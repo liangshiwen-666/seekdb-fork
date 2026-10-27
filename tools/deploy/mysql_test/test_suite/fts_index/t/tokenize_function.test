@@ -133,6 +133,20 @@ select tokenize('hello world abcdefghijklmnopqrstuvwxyz', 'space', '[{"output": 
 --error ER_NOT_SUPPORTED_YET
 select tokenize('hello world abcdefghijklmnopqrstuvwxyz', 'ik', '[{"output": "all"}, {"additional_args": [{"ngram_token_size": 6}, {"max_token_size": 10}]}]');
 
+#
+# regression for the tokenizer hot path:
+#  - repeated ik calls exercise the shared immutable dictionary cache
+#  - mixed CJK/latin/digit text exercises the character classification path
+#  - english text exercises the case-conversion and stopword fast paths
+#
+select tokenize('中华人民共和国成立了', 'ik');
+select tokenize('全文索引 分词器 倒排索引', 'ik');
+select tokenize('混合ABC中文123测试', 'ik');
+select tokenize('数据库database混合Mixed内容', 'ik');
+select tokenize('全文索引', 'ik');
+select tokenize('ABC DEF Ghi', 'beng');
+select tokenize('the quick brown fox jumps over the lazy dog', 'beng');
+select tokenize('The Quick Brown Fox', 'beng');
 
 --disable_warnings
 drop table if exists memo;

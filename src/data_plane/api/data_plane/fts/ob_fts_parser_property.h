@@ -137,6 +137,9 @@ public:
   ObFTParserProperty();
   ~ObFTParserProperty() = default;
   int parse_for_parser_helper(const ObFTParser &parser, const ObString &json_str);
+  // Build the property directly from already-parsed/validated json props,
+  // avoiding a json serialization + parse round trip on the tokenize hot path.
+  int parse_for_parser_helper(const ObFTParser &parser, const ObFTParserJsonProps &props);
 
   bool is_equal(const ObFTParserProperty &other) const
   {

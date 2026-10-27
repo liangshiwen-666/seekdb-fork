@@ -1067,6 +1067,67 @@ int ObFTParserProperty::parse_for_parser_helper(const ObFTParser &parser, const 
   return ret;
 }
 
+int ObFTParserProperty::parse_for_parser_helper(const ObFTParser &parser,
+                                                const ObFTParserJsonProps &props)
+{
+  int ret = OB_SUCCESS;
+  if (parser.is_ik()) {
+    // set dict tables and copy dict name
+    dict_table_ = ObString(ObFTSLiteral::CONFIG_NAME_DICT_TABLE);
+    stopword_table_ = ObString(ObFTSLiteral::CONFIG_NAME_STOPWORD_TABLE);
+    quantifier_table_ = ObString(ObFTSLiteral::CONFIG_NAME_QUANTIFIER_TABLE);
+    ObString ik_smart;
+    if (OB_FAIL(props.config_get_ik_mode(ik_smart))) {
+      if (OB_SEARCH_NOT_FOUND == ret) {
+        ret = OB_SUCCESS;
+      }
+    } else if (0 == ik_smart.case_compare(ObString(ObFTSLiteral::FT_IK_MODE_SMART))) {
+      ik_mode_smart_ = true;
+    } else if (0 == ik_smart.case_compare(ObString(ObFTSLiteral::FT_IK_MODE_MAX_WORD))) {
+      ik_mode_smart_ = false;
+    } else {
+      ret = OB_INVALID_ARGUMENT;
+    }
+  } else if (parser.is_space()) {
+    if (OB_FAIL(props.config_get_min_token_size(min_token_size_))) {
+      if (OB_SEARCH_NOT_FOUND == ret) {
+        ret = OB_SUCCESS;
+      }
+    } else if (OB_FAIL(props.config_get_max_token_size(max_token_size_))) {
+      if (OB_SEARCH_NOT_FOUND == ret) {
+        ret = OB_SUCCESS;
+      }
+    }
+  } else if (parser.is_ngram()) {
+    if (OB_FAIL(props.config_get_ngram_token_size(ngram_token_size_))) {
+      if (OB_SEARCH_NOT_FOUND == ret) {
+        ret = OB_SUCCESS;
+      }
+    }
+  } else if (parser.is_beng()) {
+    if (OB_FAIL(props.config_get_min_token_size(min_token_size_))) {
+      if (OB_SEARCH_NOT_FOUND == ret) {
+        ret = OB_SUCCESS;
+      }
+    } else if (OB_FAIL(props.config_get_max_token_size(max_token_size_))) {
+      if (OB_SEARCH_NOT_FOUND == ret) {
+        ret = OB_SUCCESS;
+      }
+    }
+  } else if (parser.is_ngram2()) {
+    if (OB_FAIL(props.config_get_min_ngram_token_size(min_ngram_token_size_))) {
+      if (OB_SEARCH_NOT_FOUND == ret) {
+        ret = OB_SUCCESS;
+      }
+    } else if (OB_FAIL(props.config_get_max_ngram_token_size(max_ngram_token_size_))) {
+      if (OB_SEARCH_NOT_FOUND == ret) {
+        ret = OB_SUCCESS;
+      }
+    }
+  }
+  return ret;
+}
+
 ObFTParserProperty::ObFTParserProperty()
     : min_token_size_(ObFTSLiteral::FT_DEFAULT_MIN_TOKEN_SIZE),
       max_token_size_(ObFTSLiteral::FT_DEFAULT_MAX_TOKEN_SIZE),
