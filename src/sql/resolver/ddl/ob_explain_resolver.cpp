@@ -82,9 +82,47 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
                 out += " USING utf8mb4)"; return out;
               };
               std::string sql;
+              auto result_type_name = [](const ObRawExprResType &result_type) -> const char * {
+                switch (result_type.get_type()) {
+                  case ObNullType: return "NULL";
+                  case ObSmallIntType:
+                  case ObMediumIntType:
+                  case ObInt32Type:
+                  case ObIntType:
+                  case ObUInt32Type:
+                  case ObUInt64Type:
+                    return "BIGINT";
+                  case ObFloatType:
+                  case ObDoubleType:
+                  case ObUFloatType:
+                  case ObUDoubleType:
+                    return "DOUBLE";
+                  case ObDateType:
+                  case ObMySQLDateType:
+                    return "DATE";
+                  case ObDateTimeType:
+                  case ObMySQLDateTimeType:
+                  case ObTimestampType:
+                    return "DATETIME";
+                  case ObVarcharType:
+                  case ObCharType:
+                  case ObTinyTextType:
+                  case ObTextType:
+                  case ObMediumTextType:
+                  case ObLongTextType:
+                  case ObJsonType:
+                    return "VARCHAR";
+                  default: return "VARCHAR";
+                }
+              };
               for (int64_t i = 0; i < select->get_select_item_size(); ++i) {
                 const SelectItem &item = select->get_select_item(i);
                 std::string type = "VARCHAR", nullable = "YES";
+                if (item.expr_ != nullptr) {
+                  const ObRawExprResType &result_type = item.expr_->get_result_type();
+                  type = result_type_name(result_type);
+                  nullable = result_type.has_result_flag(NOT_NULL_FLAG) ? "NO" : "YES";
+                }
                 if (item.expr_->is_column_ref_expr()) {
                   auto *column = static_cast<ObColumnRefRawExpr *>(item.expr_);
                   auto *table = select->get_table_item_by_id(column->get_table_id());

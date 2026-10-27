@@ -227,7 +227,7 @@ bool csv_row(Input &in, const Options &options, std::vector<Cell> &row)
     size_t bytes = 0;
     auto finish = [&]() {
       require(row.size() < MAX_COLUMNS, "file_sql: too many CSV columns");
-      require(valid_utf8(value), "file_sql: invalid UTF-8 at CSV line " + std::to_string(in.line_));
+      require(valid_utf8(value), "file_sql: invalid UTF-8 at CSV line " + std::to_string(in.record_line_));
       Cell cell;
       cell.is_null = !quoted && (value.empty() || value == options.null_string);
       cell.text.swap(value);
@@ -237,7 +237,7 @@ bool csv_row(Input &in, const Options &options, std::vector<Cell> &row)
     };
     int c;
     while ((c = in.get()) >= 0) {
-      require(++bytes <= MAX_ROW, "file_sql: CSV record exceeds 4 MiB at line " + std::to_string(in.line_));
+      require(++bytes <= MAX_ROW, "file_sql: CSV record exceeds 4 MiB at line " + std::to_string(in.record_line_));
       if (c == '\r') {
         const int next = in.get();
         if (next == '\n' || next == -1) {
@@ -247,14 +247,14 @@ bool csv_row(Input &in, const Options &options, std::vector<Cell> &row)
           value.push_back('\r');
           c = next;
         } else {
-          require(false, "file_sql: bare CR in CSV");
+          require(false, "file_sql: bare CR in CSV at line " + std::to_string(in.record_line_));
         }
       }
       if (c == '\n') ++in.line_;
       if (in_quote) {
         if (options.escape && options.escape != options.quote && c == options.escape) {
           int next = in.get();
-          require(next >= 0, "file_sql: truncated CSV escape");
+          require(next >= 0, "file_sql: truncated CSV escape at line " + std::to_string(in.record_line_));
           value.push_back(static_cast<char>(next));
         } else if (c == options.quote) {
           in_quote = false; closed = true;
@@ -271,16 +271,16 @@ bool csv_row(Input &in, const Options &options, std::vector<Cell> &row)
         if (!blank) return true;
         break;
       } else if (closed) {
-        require(c == ' ' || c == '\t', "file_sql: characters after CSV quote at line " + std::to_string(in.line_));
+        require(c == ' ' || c == '\t', "file_sql: characters after CSV quote at line " + std::to_string(in.record_line_));
       } else if (!started && options.quote && c == options.quote) {
         quoted = in_quote = started = true;
       } else {
-        require(!options.quote || c != options.quote, "file_sql: unexpected CSV quote at line " + std::to_string(in.line_));
+        require(!options.quote || c != options.quote, "file_sql: unexpected CSV quote at line " + std::to_string(in.record_line_));
         started = true; value.push_back(static_cast<char>(c));
       }
     }
     if (c < 0) {
-      require(!in_quote, "file_sql: unterminated CSV quote at line " + std::to_string(in.line_));
+      require(!in_quote, "file_sql: unterminated CSV quote at line " + std::to_string(in.record_line_));
       if (bytes == 0 && row.empty()) return false;
       finish();
       return true;
@@ -609,7 +609,7 @@ public:
     // doing that for every row is too expensive for large inputs. The open fd,
     // its stamp and the inotify watch cover in-place writes and path replacement
     // (MOVE_SELF/DELETE_SELF), so re-check the path only periodically.
-    if ((++checks_ & 0xfff) != 0) return;
+    if ((++checks_ & 0xff) != 0) return;
     std::string path;
     Fd current(secure_open(definition_.source_path.empty() ? definition_.path : definition_.source_path, root_, path));
     require(stamp_fd(current.value) == definition_.stamp, "file_sql: input path replaced during scan");
@@ -623,7 +623,14 @@ public:
     fd_.value = -1;
     fd_.value = secure_open(definition_.source_path.empty() ? definition_.path : definition_.source_path, root_, path);
     watch_.reset(path);
-    require(hash_file(fd_.value) == definition_.content_hash, "file_sql: input contents changed since schema inference");
+    // Fingerprinting reads the whole file. Only the first open (and a rescan whose
+    // identity stamp no longer matches the inferred one) needs it: the inotify
+    // watch covers writes while the file is open, and check() below rejects any
+    // stamp change before a row is produced.
+    if (!content_verified_ || !(stamp_fd(fd_.value) == definition_.stamp)) {
+      require(hash_file(fd_.value) == definition_.content_hash, "file_sql: input contents changed since schema inference");
+      content_verified_ = true;
+    }
     check();
     input_.reset(new Input(fd_.value));
     if (definition_.options.format == Format::Parquet) parquet_.reset(new ParquetScan(fd_.value, definition_.stamp.size, projection_));
@@ -677,6 +684,7 @@ public:
   std::vector<std::string> paths_;
   uint64_t position_ = 0;
   uint64_t checks_ = 0;
+  bool content_verified_ = false;
 };
 
 Scan::Scan(const Definition &d, const std::string &root, const std::vector<size_t> &projection)
