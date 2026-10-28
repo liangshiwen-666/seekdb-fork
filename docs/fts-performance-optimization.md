@@ -41,8 +41,10 @@ Local measurements on the benchmark workload (20k documents) showed:
 5. **Per-word processing** (`ob_fts_stop_word.cpp`):
    - stopword check: skip the per-word arena + charset conversion when the
      charsets are identical (conversion is the identity mapping);
-   - case conversion: skip the copy + conversion when the word is pure ASCII
-     without uppercase letters.
+   - case conversion: skip the copy + unicode conversion when the word cannot
+     change under lower-casing - pure ASCII without uppercase letters, or CJK
+     text (CJK characters have no case mapping), which covers most tokens of
+     the Chinese fulltext path.
 
 No tokenization rules, dictionary contents, match semantics or result formats
 are changed.

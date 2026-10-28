@@ -18,14 +18,56 @@
 #define USING_LOG_PREFIX STORAGE_FTS
 
 #include "share/rc/ob_server_runtime.h"
+#include "lib/charset/ob_charset_string_helper.h"
 #include "storage/fts/ob_fts_stop_word.h"
 #include "storage/fts/ob_fts_parser_helper.h"
 #include "storage/fts/ob_fts_parser_property.h"
+#include "storage/fts/utils/unicode_utils.h"
 
 namespace oceanbase
 {
 namespace storage
 {
+
+namespace
+{
+// Returns true if lower-casing the word may change it. ASCII words without
+// upper case letters and CJK characters (which have no case mapping) are
+// already in lower-case form, so the copy + unicode case conversion can be
+// skipped for them.
+bool ft_word_needs_casedown(const ObString &word, const ObCollationType coll_type)
+{
+  bool needs = false;
+  const bool is_utf8mb4 = (CHARSET_UTF8MB4 == ObCharset::charset_type_by_coll(coll_type));
+  const unsigned char *cur = reinterpret_cast<const unsigned char *>(word.ptr());
+  const unsigned char *end = cur + word.length();
+  while (!needs && cur < end) {
+    const unsigned char c = *cur;
+    if (c < 0x80) {
+      if (c >= 'A' && c <= 'Z') {
+        needs = true;
+      } else {
+        ++cur;
+      }
+    } else if (is_utf8mb4) {
+      ob_wc_t wc = 0;
+      const int code_size = common::ob_charset_decode_unicode<common::CHARSET_UTF8MB4>(cur, end, wc);
+      if (code_size < 0) {
+        needs = true;
+      } else if (ObUnicodeBlockUtils::is_chinese(wc)
+                 || ObUnicodeBlockUtils::is_other_cjk(wc)) {
+        cur += code_size;
+      } else {
+        // Could be a cased character in another script.
+        needs = true;
+      }
+    } else {
+      needs = true;
+    }
+  }
+  return needs;
+}
+} // namespace
 
 ////////////////////////////////////////////////////////////////////////////////
 // class ObStopWordChecker
@@ -179,16 +221,10 @@ int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
     ret = OB_INVALID_ARGUMENT;
   } else if (flag_.casedown()) {
     const ObString src_str = src.get_word().get_string();
-    // Fast path: pure ASCII text without uppercase letters is already in the
-    // result form of casedown, so the copy + case conversion can be skipped.
-    bool need_casedown = false;
-    for (int64_t i = 0; !need_casedown && i < src_str.length(); ++i) {
-      const unsigned char c = static_cast<unsigned char>(src_str.ptr()[i]);
-      if (c >= 0x80 || (c >= 'A' && c <= 'Z')) {
-        need_casedown = true;
-      }
-    }
-    if (!need_casedown) {
+    // Fast path: words that are already in lower-case form (pure lower-case
+    // ASCII, or CJK without case mapping) do not need the copy and the unicode
+    // case conversion.
+    if (!ft_word_needs_casedown(src_str, word_meta_.get_collation_type())) {
       dst = src;
     } else {
       ObString dst_str;
