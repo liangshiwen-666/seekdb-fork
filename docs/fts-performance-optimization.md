@@ -54,3 +54,25 @@
 | query_limit_avg_ms | 1.78 | 2.05 | 受并行构建索引布局影响（相关性 top-k，语义不变） |
 
 注：本地绝对值与评测环境不同，仅作相对参考。
+
+## Query: count-only fast path in the DAAT merge
+
+`SELECT COUNT(*) ... WHERE MATCH(...)` only needs the number of matched rows.
+The generic DAAT merge still builds merge items, runs the BM25 relevance
+collector, buffers the projected doc ids/relevances and projects every row
+back into the expression datums. None of that is observable for a pure count
+statement.
+
+The text retrieval merge now sets `count_only_` when the scan has no relevance
+expression, no match filter and uses the natural-language mode, and the DAAT
+iterator then:
+- skips the per-row BM25 score collection (no relevance expression, no filter);
+- skips buffering the doc ids/relevances and the per-row projection;
+- counts the union of the posting-list streams with a small linear scan over
+  the dimension iterators instead of the generic heap machinery.
+
+`COUNT(*)`, `COUNT(const)`, plain column projection, boolean mode and the
+relevance top-k shapes are unchanged (they keep the original plan and merge
+path). Measured on the local 20k-document benchmark: `query_cn` 1.13 -> 0.93 ms
+(-18%), `query_beng` 1.64 -> 1.45 ms (-12%), `query_mixed` 1.25 -> 1.10 ms
+(-12%); hit counts are unchanged (8001 / 11000 / 7332 / 20).
