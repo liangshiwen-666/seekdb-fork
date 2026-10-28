@@ -67,6 +67,11 @@ public:
 
   int find(const ObFTSingleWord &word, ObFTWordCode &code) const;
 
+  // Fill a direct character -> code table for the single utf8 characters in
+  // [base_cp, base_cp + cp_cnt). The table is used as a fast path by the DAT
+  // reader to avoid a hash lookup for the very common CJK characters.
+  int fill_cp_code_table(int32_t *table, int64_t base_cp, int64_t cp_cnt) const;
+
 private:
   struct Header header_;
 } __attribute__((packed));
@@ -81,6 +86,9 @@ struct ObFTDAT
 public:
   static constexpr int32_t FIRST_BASE = 1;
   static constexpr int32_t FIRST_INDEX = 1;
+  // character range covered by the direct code table (CJK unified ideographs)
+  static constexpr int32_t CP_TABLE_BASE = 0x4E00;
+  static constexpr int32_t CP_TABLE_CNT = 0x9FFF - 0x4E00 + 1;
   // all size in bytes
   int64_t mem_block_size_ = 0;
   // node_num_: number of nodes in the trie.
@@ -94,6 +102,11 @@ public:
   size_t map_offset_ = 0;
   size_t base_offset_ = 0;
   size_t check_offset_ = 0;
+  // optional direct single-character -> code table for CJK unified
+  // ideographs, appended after the check array. cp_code_offset_ == 0 means the
+  // table is not available and the reader falls back to the hash map.
+  size_t cp_code_offset_ = 0;
+  size_t cp_code_size_ = 0;
 
   // use if offset is not 0, it means the data is in the data block
   size_t data_index_offset_ = 0;
@@ -106,6 +119,8 @@ public:
 
 public:
   ObArrayHashMap *get_map();
+  // Direct character code table for the CJK range, nullptr if not available.
+  int32_t *get_cp_code_table();
 } __attribute__((packed));
 
 template <typename DataType>

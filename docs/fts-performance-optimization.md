@@ -45,6 +45,18 @@ Local measurements on the benchmark workload (20k documents) showed:
      change under lower-casing - pure ASCII without uppercase letters, or CJK
      text (CJK characters have no case mapping), which covers most tokens of
      the Chinese fulltext path.
+6. **CJK character code table in the DAT dictionary** (`ob_ft_dat_dict.*`): the
+   DAT reader mapped every character of the text to its dictionary code with a
+   hash lookup in a fixed-size array hash map (hash the utf8 bytes + probe);
+   profiling showed this lookup was the hottest function of the Chinese
+   tokenize path. The builder now also materializes a direct
+   character-code table for the CJK unified ideographs range
+   (`[0x4E00, 0x9FFF]`, 84 KB per dictionary, stored inside the same DAT
+   memory block and moved on expansion), and the reader uses it for three-byte
+   CJK characters, falling back to the hash map for everything else.
+   Single-tokenize hot path measurement: net tokenize time (SQL overhead
+   removed) 0.086 -> 0.061 ms, about -29%; the benchmark `tokenize_ik` metric
+   is about -13%. TOKENIZE output is byte identical.
 
 No tokenization rules, dictionary contents, match semantics or result formats
 are changed.

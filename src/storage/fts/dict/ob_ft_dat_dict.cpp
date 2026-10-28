@@ -42,7 +42,8 @@ int ObFTDATBuilder<DATA_TYPE>::init(ObFTTrie<DATA_TYPE> &trie)
     size_t array_size = trie.node_num() * 6; // by experience.
     size_t base_size = array_size * sizeof(int32_t);
     size_t check_size = base_size;
-    size_t total_size = sizeof(ObFTDAT) + map_size + base_size + check_size;
+    size_t cp_code_size = ObFTDAT::CP_TABLE_CNT * sizeof(int32_t);
+    size_t total_size = sizeof(ObFTDAT) + map_size + base_size + check_size + cp_code_size;
 
     if (OB_ISNULL(dat_ = static_cast<ObFTDAT *>(alloc_.alloc(total_size)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -52,6 +53,8 @@ int ObFTDATBuilder<DATA_TYPE>::init(ObFTTrie<DATA_TYPE> &trie)
       dat_->array_size_ = array_size;
       dat_->base_offset_ = map_size;
       dat_->check_offset_ = dat_->base_offset_ + base_size;
+      dat_->cp_code_offset_ = dat_->check_offset_ + check_size;
+      dat_->cp_code_size_ = cp_code_size;
       map_ = dat_->get_map();
       if (OB_FAIL(map_->init(trie.node_num()))) {
       }
@@ -183,6 +186,9 @@ int ObFTDATBuilder<DATA_TYPE>::build_from_trie(ObFTTrie<DATA_TYPE> &trie)
       // already logged
     } else if (OB_FAIL(trie.get_start_word(dat_->start_word_))) {
     } else if (OB_FAIL(trie.get_end_word(dat_->end_word_))) {
+    } else if (OB_FAIL(map_->fill_cp_code_table(dat_->get_cp_code_table(),
+                                               ObFTDAT::CP_TABLE_BASE,
+                                               ObFTDAT::CP_TABLE_CNT))) {
     }
     LOG_INFO("build dat finished", K(dat_->start_word_.get_word()), K(dat_->end_word_.get_word()));
 
@@ -216,6 +222,16 @@ int ObFTDATBuilder<DATA_TYPE>::expand()
     // check
     size_t check_size = array_size * sizeof(int32_t);
     MEMCPY(new_dat->buff + new_dat->check_offset_, dat_->buff + dat_->check_offset_, check_size);
+    // the optional CJK code table lives after the (now enlarged) check array
+    new_dat->cp_code_size_ = dat_->cp_code_size_;
+    if (dat_->cp_code_size_ > 0 && dat_->cp_code_offset_ > 0) {
+      new_dat->cp_code_offset_ = new_dat->check_offset_ + new_dat->array_size_ * sizeof(int32_t);
+      MEMCPY(new_dat->buff + new_dat->cp_code_offset_,
+             dat_->buff + dat_->cp_code_offset_,
+             dat_->cp_code_size_);
+    } else {
+      new_dat->cp_code_offset_ = 0;
+    }
     alloc_.free(dat_);
     dat_ = new_dat;
     map_ = dat_->get_map();
@@ -252,17 +268,47 @@ int ObFTDATReader<DATA_TYPE>::match_with_hit(const ObString &ft_char,
                                              ObDATrieHit &hit) const
 {
   int ret = OB_SUCCESS;
-  ObFTWordCode code;
+  ObFTWordCode code = 0;
   hit.set_unmatch();
-  auto *map = dat_->get_map();
   int32_t *base = reinterpret_cast<int32_t *>(dat_->buff + dat_->base_offset_);
   int32_t *check = reinterpret_cast<int32_t *>(dat_->buff + dat_->check_offset_);
 
-  ObFTSingleWord word;
-  word.set_word(ft_char.ptr(), ft_char.length());
-  if (OB_FAIL(dat_->get_map()->find(word, code)) && OB_ENTRY_NOT_EXIST != ret) {
-  } else if (OB_ENTRY_NOT_EXIST == ret) {
-    ret = OB_SUCCESS;
+  // Fast path: single three-byte CJK characters can be mapped to their code by
+  // a direct table, which avoids hashing the character and probing the code
+  // map for every character of the text (the Chinese dictionary is mostly made
+  // of such characters).
+  bool got_code = false;
+  bool cp_in_range = false;
+  int32_t *cp_table = dat_->get_cp_code_table();
+  if (OB_NOT_NULL(cp_table) && 3 == ft_char.length()) {
+    const unsigned char *b = reinterpret_cast<const unsigned char *>(ft_char.ptr());
+    if (b[0] >= 0xE4 && b[0] <= 0xE9 && (b[1] & 0xC0) == 0x80 && (b[2] & 0xC0) == 0x80) {
+      const int32_t cp = ((b[0] & 0x0F) << 12) | ((b[1] & 0x3F) << 6) | (b[2] & 0x3F);
+      if (cp >= ObFTDAT::CP_TABLE_BASE
+          && cp < ObFTDAT::CP_TABLE_BASE + ObFTDAT::CP_TABLE_CNT) {
+        // The table covers every single CJK character of the dictionary: a
+        // zero means the character is not part of it, no need to probe the map.
+        code = cp_table[cp - ObFTDAT::CP_TABLE_BASE];
+        got_code = (0 != code);
+        cp_in_range = true;
+      }
+    }
+  }
+  if (OB_SUCC(ret) && !cp_in_range) {
+    ObFTSingleWord word;
+    word.set_word(ft_char.ptr(), ft_char.length());
+    const int find_ret = dat_->get_map()->find(word, code);
+    if (OB_SUCCESS == find_ret) {
+      got_code = (0 != code);
+    } else if (OB_ENTRY_NOT_EXIST == find_ret) {
+      got_code = false;
+    } else {
+      ret = find_ret;
+    }
+  }
+
+  if (OB_FAIL(ret)) {
+  } else if (!got_code) {
     hit.set_unmatch();
   } else {
     if (&last_hit == &hit) {
@@ -298,6 +344,42 @@ template class ObFTDATBuilder<void>;
 template class ObFTDATReader<void>;
 
 ObArrayHashMap *ObFTDAT::get_map() { return reinterpret_cast<ObArrayHashMap *>(buff); }
+
+int32_t *ObFTDAT::get_cp_code_table()
+{
+  return (0 == cp_code_offset_ || 0 == cp_code_size_)
+      ? nullptr
+      : reinterpret_cast<int32_t *>(buff + cp_code_offset_);
+}
+
+int ObArrayHashMap::fill_cp_code_table(int32_t *table, int64_t base_cp, int64_t cp_cnt) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(table) || cp_cnt <= 0) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    for (size_t i = 0; OB_SUCC(ret) && i < header_.capacity_; ++i) {
+      if (!header_.data[i].used) {
+        continue;
+      }
+      const ObString word = header_.data[i].word.get_word();
+      // the code map only holds single characters; the direct table is for the
+      // three bytes long utf8 characters inside the CJK range.
+      if (word.length() != 3) {
+        continue;
+      }
+      const unsigned char *b = reinterpret_cast<const unsigned char *>(word.ptr());
+      if (b[0] < 0xE0 || b[0] > 0xEF || (b[1] & 0xC0) != 0x80 || (b[2] & 0xC0) != 0x80) {
+        continue;
+      }
+      const int32_t cp = ((b[0] & 0x0F) << 12) | ((b[1] & 0x3F) << 6) | (b[2] & 0x3F);
+      if (cp >= base_cp && cp < base_cp + cp_cnt) {
+        table[cp - base_cp] = header_.data[i].code;
+      }
+    }
+  }
+  return ret;
+}
 
 int ObArrayHashMap::find(const ObFTSingleWord &word, ObFTWordCode &code) const
 {
