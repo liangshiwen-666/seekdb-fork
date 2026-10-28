@@ -34,6 +34,8 @@ int ObFTDictHub::init()
   int ret = OB_SUCCESS;
   if (OB_FAIL(dict_map_.create(K_MAX_DICT_BUCKET, "dict_map"))) {
   } else if (OB_FAIL(rw_dict_lock_.init(K_MAX_DICT_BUCKET))) {
+  } else if (OB_FAIL(shared_dict_map_.create(K_MAX_DICT_BUCKET, "shared_dict_map"))) {
+  } else if (OB_FAIL(shared_dict_lock_.init(K_MAX_DICT_BUCKET))) {
   } else {
     is_inited_ = true;
   }
@@ -43,6 +45,27 @@ int ObFTDictHub::init()
 int ObFTDictHub::destroy()
 {
   int ret = OB_SUCCESS;
+  if (is_inited_) {
+    for (hash::ObHashMap<ObFTDictInfoKey, ObFTSharedDict>::iterator iter = shared_dict_map_.begin();
+         iter != shared_dict_map_.end();
+         ++iter) {
+      ObFTSharedDict &entry = iter->second;
+      if (OB_NOT_NULL(entry.dict_)) {
+        entry.dict_->destroy();
+        entry.dict_->~ObFTRangeDict();
+        entry.dict_ = nullptr;
+      }
+      if (OB_NOT_NULL(entry.container_)) {
+        entry.container_->~ObFTCacheRangeContainer();
+        entry.container_ = nullptr;
+      }
+    }
+    shared_dict_map_.destroy();
+    dict_map_.destroy();
+    rw_dict_lock_.destroy();
+    shared_dict_lock_.destroy();
+    dict_alloc_.reset();
+  }
   is_inited_ = false;
   return ret;
 }
@@ -83,37 +106,52 @@ int ObFTDictHub::build_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &
   return ret;
 }
 
-int ObFTDictHub::load_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &container)
+int ObFTDictHub::get_range_dict(const ObFTDictDesc &desc, ObFTRangeDict *&dict)
 {
   int ret = OB_SUCCESS;
-  ObFTDictInfo info;
-  container.reset();
+  dict = nullptr;
   ObFTDictInfoKey key(static_cast<uint64_t>(desc.type_));
+
   if (!is_inited_) {
     ret = OB_NOT_INIT;
   } else {
-    {
-      ObBucketHashRLockGuard guard(rw_dict_lock_, key.hash());
-      if (OB_FAIL(get_dict_info(key, info))) {
-        if (OB_HASH_NOT_EXIST == ret) {
-          // dict not exist, make new one, by caller
-          ret = OB_ENTRY_NOT_EXIST;
-        } else {
-        }
-      }
+    ObBucketHashRLockGuard guard(shared_dict_lock_, key.hash());
+    ObFTSharedDict entry;
+    if (OB_SUCC(shared_dict_map_.get_refactored(key, entry))) {
+      dict = entry.dict_;
+    } else if (OB_HASH_NOT_EXIST == ret) {
+      ret = OB_SUCCESS;
     }
-    if (OB_FAIL(ret)) {
-    } else if (OB_FAIL(ObFTRangeDict::try_load_cache(desc, info.range_count_, container))) {
-      if (OB_ENTRY_NOT_EXIST == ret) {
-        // dict not exist, make new one, by caller
-      } else {
-      }
+  }
+
+  if (OB_SUCC(ret) && OB_ISNULL(dict)) {
+    // Building a dictionary is expensive and the content of the built-in dicts
+    // never changes at runtime, so serialize the build per dict type.
+    ObBucketHashWLockGuard guard(shared_dict_lock_, key.hash());
+    ObFTSharedDict entry;
+    if (OB_SUCC(shared_dict_map_.get_refactored(key, entry))) {
+      dict = entry.dict_;
+    } else if (OB_HASH_NOT_EXIST != ret) {
+    } else if (FALSE_IT(ret = OB_SUCCESS)) {
+    } else if (OB_ISNULL(entry.container_ =
+                             OB_NEWx(ObFTCacheRangeContainer, &dict_alloc_, dict_alloc_))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else if (OB_FAIL(build_cache(desc, *entry.container_))) {
+    } else if (OB_ISNULL(entry.dict_ = OB_NEWx(ObFTRangeDict,
+                                               &dict_alloc_,
+                                               dict_alloc_,
+                                               entry.container_,
+                                               desc))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else if (OB_FAIL(entry.dict_->init())) {
+    } else if (OB_FAIL(shared_dict_map_.set_refactored(key, entry))) {
+    } else {
+      dict = entry.dict_;
     }
   }
 
   return ret;
 }
-
 
 int ObFTDictHub::get_dict_info(const ObFTDictInfoKey &key, ObFTDictInfo &info)
 {

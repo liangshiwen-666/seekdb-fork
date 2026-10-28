@@ -1903,6 +1903,19 @@ int ObCharset::tolower(const ObCollationType collation_type,
   return ret;
 }
 
+// Whether lower-casing may modify the string: non-ascii bytes may be upper case
+// multi-byte characters, ascii letters 'A'..'Z' are the only single byte ones.
+static bool needs_case_down(const ObString &str)
+{
+  bool need = false;
+  const char *ptr = str.ptr();
+  for (int64_t i = 0; !need && i < str.length(); ++i) {
+    const uint8_t c = static_cast<uint8_t>(ptr[i]);
+    need = (c >= 0x80) || (c >= 'A' && c <= 'Z');
+  }
+  return need;
+}
+
 int ObCharset::tolower(const ObCharsetInfo *cs_info,
                        const ObString &src, ObString &dst,
                        ObIAllocator &allocator)
@@ -1910,6 +1923,9 @@ int ObCharset::tolower(const ObCharsetInfo *cs_info,
   int ret = OB_SUCCESS;
   if (OB_ISNULL(cs_info)) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (!needs_case_down(src)) {
+    // already lower case, skip the copy and conversion
+    dst = src;
   } else {
     int casemulti = cs_info->casedn_multiply;
     if (1 == casemulti) {

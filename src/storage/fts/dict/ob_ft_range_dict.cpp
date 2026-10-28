@@ -378,25 +378,54 @@ int ObFTRangeDict::match_with_hit(const ObString &single_word,
   return last_hit.dict_->match_with_hit(single_word, last_hit, hit);
 }
 
+int ObFTRangeDict::cmp_bin(const ObString &left, const ObString &right)
+{
+  // CS_TYPE_UTF8MB4_BIN orders by unsigned byte value, then by length.
+  const int64_t len = MIN(left.length(), right.length());
+  int cmp = (len > 0) ? MEMCMP(left.ptr(), right.ptr(), len) : 0;
+  if (0 == cmp) {
+    cmp = static_cast<int>(left.length() - right.length());
+  }
+  return cmp;
+}
+
 int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const
 {
   int ret = OB_SUCCESS;
-  bool found = false;
-  for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
-    if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
-      dict = range_dicts_[i].dict_;
-      found = true;
+  const int64_t range_cnt = range_dicts_.size();
+  // Consecutive words of one document usually fall into the same range, so probe
+  // the previously matched range before searching. Dicts are shared between
+  // parsers running on different threads, hence the hint has to be per thread;
+  // a hint left by another dict is rejected by the range check below.
+  static thread_local int64_t last_range_idx = -1;
+  int64_t idx = -1;
+  if (last_range_idx >= 0 && last_range_idx < range_cnt) {
+    const ObFTRange &range = range_dicts_[last_range_idx];
+    if (cmp_bin(range.start_.get_word(), single_word) <= 0
+        && cmp_bin(single_word, range.end_.get_word()) <= 0) {
+      idx = last_range_idx;
     }
   }
-  if (!found) {
-    // not found, dis match
+  if (idx < 0) {
+    // Ranges are sorted and disjoint, find the first one whose end_ is not less than the word.
+    int64_t low = 0;
+    int64_t high = range_cnt - 1;
+    while (low <= high) {
+      const int64_t mid = low + (high - low) / 2;
+      if (cmp_bin(range_dicts_[mid].end_.get_word(), single_word) < 0) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    if (low < range_cnt && cmp_bin(range_dicts_[low].start_.get_word(), single_word) <= 0) {
+      idx = low;
+    }
+  }
+  if (idx >= 0) {
+    dict = range_dicts_[idx].dict_;
+    last_range_idx = idx;
+  } else {
     ret = OB_ENTRY_NOT_EXIST;
   }
   return ret;

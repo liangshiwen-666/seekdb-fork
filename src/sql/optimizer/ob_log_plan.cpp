@@ -11987,6 +11987,113 @@ int ObLogPlan::construct_startup_filter_for_limit(ObRawExpr *limit_expr, ObLogic
   return ret;
 }
 
+static bool raw_expr_contains_match_expr(const ObRawExpr *expr, const ObRawExpr *match_expr)
+{
+  bool found = false;
+  if (OB_NOT_NULL(expr) && OB_NOT_NULL(match_expr)) {
+    if (expr == match_expr) {
+      found = true;
+    } else {
+      for (int64_t i = 0; !found && i < expr->get_param_count(); ++i) {
+        found = raw_expr_contains_match_expr(expr->get_param_expr(i), match_expr);
+      }
+    }
+  }
+  return found;
+}
+
+static bool is_zero_const_expr(const ObRawExpr *expr)
+{
+  bool is_zero = false;
+  if (OB_NOT_NULL(expr) && expr->is_const_raw_expr()) {
+    const ObObj &value = static_cast<const ObConstRawExpr *>(expr)->get_value();
+    if (value.is_integer_type()) {
+      is_zero = 0 == value.get_int();
+    } else if (value.is_number()) {
+      is_zero = value.get_number().is_zero();
+    } else if (value.is_double()) {
+      is_zero = 0.0 == value.get_double();
+    }
+  }
+  return is_zero;
+}
+
+// The predicate only checks whether the document matches the query, which is
+// equivalent to the bm25 score being positive. Documents returned by the
+// fulltext index scan always have a positive score, so the predicate is
+// redundant and the score does not need to be calculated.
+static bool is_match_score_only_predicate(const ObRawExpr *pred, const ObRawExpr *match_expr)
+{
+  bool is_score_only = false;
+  if (OB_ISNULL(pred) || OB_ISNULL(match_expr)) {
+  } else if (pred == match_expr) {
+    is_score_only = true;
+  } else if (T_OP_BOOL == pred->get_expr_type()) {
+    is_score_only = 1 == pred->get_param_count() && match_expr == pred->get_param_expr(0);
+  } else if (T_OP_GT == pred->get_expr_type() || T_OP_GE == pred->get_expr_type()) {
+    is_score_only = 2 == pred->get_param_count()
+        && match_expr == pred->get_param_expr(0)
+        && is_zero_const_expr(pred->get_param_expr(1));
+  } else if (T_OP_LT == pred->get_expr_type() || T_OP_LE == pred->get_expr_type()) {
+    is_score_only = 2 == pred->get_param_count()
+        && is_zero_const_expr(pred->get_param_expr(0))
+        && match_expr == pred->get_param_expr(1);
+  }
+  return is_score_only;
+}
+
+void ObLogPlan::check_need_calc_text_retrieval_relevance(ObLogTableScan *table_scan,
+                                                         const ObRawExpr *match_expr,
+                                                         const ObRawExpr *match_pred,
+                                                         const ObIArray<ObRawExpr *> &all_match_filters,
+                                                         bool &need_calc_relevance)
+{
+  need_calc_relevance = true;
+  const ObDMLStmt *stmt = get_stmt();
+  if (OB_ISNULL(stmt) || OB_ISNULL(table_scan) || OB_ISNULL(match_expr) || OB_ISNULL(match_pred)) {
+  } else if (!stmt->is_select_stmt()) {
+  } else {
+    const ObSelectStmt *select_stmt = static_cast<const ObSelectStmt *>(stmt);
+    // a scalar aggregation (for example count(*)) consumes no row value, only group-by exprs can
+    const bool no_group_by = !select_stmt->has_group_by() || select_stmt->is_scala_group_by();
+    if (OB_UNLIKELY(1 != stmt->get_table_items().count())
+        || OB_ISNULL(stmt->get_table_items().at(0))
+        || stmt->get_table_items().at(0)->is_joined_table()
+        || stmt->has_order_by()
+        || stmt->has_subquery()
+        || OB_NOT_NULL(stmt->get_limit_expr())
+        || OB_NOT_NULL(stmt->get_offset_expr())
+        || stmt->is_fetch_with_ties()
+        || !no_group_by
+        || select_stmt->has_having()
+        || select_stmt->has_window_function()
+        || select_stmt->has_window_function_filter()
+        || select_stmt->has_distinct()
+        || table_scan->is_vec_idx_scan()
+        || table_scan->has_func_lookup()
+        || table_scan->has_es_match()
+        || table_scan->has_merge_fts_index()
+        || OB_UNLIKELY(1 != all_match_filters.count())
+        || all_match_filters.at(0) != match_pred
+        || !is_match_score_only_predicate(match_pred, match_expr)) {
+      // the relevance score may be used by other operators, keep calculating it
+    } else {
+      bool score_is_used = false;
+      for (int64_t i = 0; !score_is_used && i < select_stmt->get_select_item_size(); ++i) {
+        score_is_used = raw_expr_contains_match_expr(select_stmt->get_select_item(i).expr_, match_expr);
+      }
+      const ObIArray<ObRawExpr *> &conditions = stmt->get_condition_exprs();
+      for (int64_t i = 0; !score_is_used && i < conditions.count(); ++i) {
+        score_is_used = conditions.at(i) != match_pred
+            && raw_expr_contains_match_expr(conditions.at(i), match_expr);
+      }
+      if (!score_is_used) {
+        need_calc_relevance = false;
+      }
+    }
+  }
+}
+
 int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_match_exprs,
                                            const ObIArray<ObRawExpr *> &scan_match_filters,
                                            const ObIArray<ObRawExpr *> &all_match_filters,
@@ -12046,6 +12153,14 @@ int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_mat
     }
     if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.doc_id_idx_tid_ == OB_INVALID_ID))) {
     } else if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.rowkey_idx_tid_ == OB_INVALID_ID))) {
+    } else {
+      bool need_calc_relevance = true;
+      check_need_calc_text_retrieval_relevance(table_scan,
+                                               match_against,
+                                               match_pred,
+                                               all_match_filters,
+                                               need_calc_relevance);
+      tr_info.need_calc_relevance_ = need_calc_relevance;
     }
   }
 

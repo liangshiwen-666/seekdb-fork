@@ -17,6 +17,7 @@
 #ifndef _OCEANBASE_STORAGE_FTS_DICT_OB_FT_DICT_HUB_H_
 #define _OCEANBASE_STORAGE_FTS_DICT_OB_FT_DICT_HUB_H_
 
+#include "lib/allocator/page_arena.h"
 #include "lib/charset/ob_charset.h"
 #include "lib/lock/ob_bucket_lock.h"
 #include "storage/fts/dict/ob_ft_dict_def.h"
@@ -93,10 +94,30 @@ private:
 };
 
 class ObFTCacheRangeContainer;
+class ObFTRangeDict;
+
+// A dictionary built once and shared by every parser of the process. The range
+// container pins the cache entries the dictionary reads from, so both have to
+// live as long as the hub does.
+struct ObFTSharedDict
+{
+  ObFTSharedDict() : container_(nullptr), dict_(nullptr) {}
+
+  ObFTCacheRangeContainer *container_;
+  ObFTRangeDict *dict_;
+};
+
 class ObFTDictHub
 {
 public:
-  ObFTDictHub() : is_inited_(false), dict_map_(), rw_dict_lock_() {}
+  ObFTDictHub()
+      : is_inited_(false),
+        dict_map_(),
+        rw_dict_lock_(),
+        shared_dict_map_(),
+        shared_dict_lock_(),
+        dict_alloc_(lib::ObMemAttr("FT Dict Hub"))
+  {}
   ~ObFTDictHub() {}
 
   int init();
@@ -105,7 +126,9 @@ public:
 
   int build_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &container);
 
-  int load_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &container);
+  // Returns the shared dictionary of desc.type_. It is built on first use and
+  // owned by the hub, so the caller must not destroy it.
+  int get_range_dict(const ObFTDictDesc &desc, ObFTRangeDict *&dict);
 
 private:
   int get_dict_info(const ObFTDictInfoKey &key, ObFTDictInfo &info);
@@ -118,6 +141,9 @@ private:
   // holds info of dict
   hash::ObHashMap<ObFTDictInfoKey, ObFTDictInfo> dict_map_;
   ObBucketLock rw_dict_lock_;
+  hash::ObHashMap<ObFTDictInfoKey, ObFTSharedDict> shared_dict_map_;
+  ObBucketLock shared_dict_lock_;
+  ObArenaAllocator dict_alloc_;
 };
 
 } //  namespace storage

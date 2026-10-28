@@ -70,6 +70,15 @@ public:
 
   static int build_cache_from_ik_dict(const ObFTDictDesc &desc, ObFTCacheRangeContainer &range_container);
 
+  void destroy()
+  {
+    for (int64_t i = 0; i < range_dicts_.size(); i++) {
+      range_dicts_[i].dict_->~ObIFTDict(); // destroy dict
+    }
+    range_dicts_.reset();
+    range_alloc_.reset();
+  }
+
 private:
   // build cache
   static int build_ranges(const ObFTDictDesc &desc,
@@ -88,15 +97,7 @@ private:
                                                    ObFTCacheRangeContainer &range_container);
 
 private:
-  void destroy()
-  {
-    for (int64_t i = 0; i < range_dicts_.size(); i++) {
-      range_dicts_[i].dict_->~ObIFTDict(); // destroy dict
-    }
-    range_dicts_.reset();
-    range_alloc_.reset();
-  }
-
+  static int cmp_bin(const ObString &left, const ObString &right);
   int find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const;
 
 private:

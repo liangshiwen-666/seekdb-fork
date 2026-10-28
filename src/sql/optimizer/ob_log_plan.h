@@ -1428,6 +1428,11 @@ public:
                                   const ObIArray<ObRawExpr *> &all_match_filters,
                                   ObIArray<ObRawExpr *> &scan_filters,
                                   ObLogicalOperator *scan);
+  void check_need_calc_text_retrieval_relevance(ObLogTableScan *table_scan,
+                                                const ObRawExpr *match_expr,
+                                                const ObRawExpr *match_pred,
+                                                const ObIArray<ObRawExpr *> &all_match_filters,
+                                                bool &need_calc_relevance);
   int prepare_text_retrieval_lookup(const ObIArray<ObRawExpr *> &lookup_match_exprs,
                                     const ObIArray<uint64_t> &lookup_index_ids,
                                     ObLogicalOperator *scan);

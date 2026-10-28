@@ -1031,6 +1031,11 @@ int ObFtsIndexBuilderUtil::generate_doc_id_column(
   return ret;
 }
 
+// Fulltext aux table builds are CPU bound (tokenization dominates) and would run
+// serially when neither a hint nor the table dop asks for parallelism. A small
+// default keeps the build from leaving cores idle; explicit hints (> 1) still win.
+static constexpr int64_t FTS_BUILD_DEFAULT_PARALLELISM = 4;
+
 int ObFtsIndexBuilderUtil::decide_parallelism(
     const share::schema::ObIndexType index_type,
     const int64_t original_parallelism,
@@ -1043,11 +1048,17 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
     switch (index_type) {
       case share::schema::ObIndexType::INDEX_TYPE_ROWKEY_DOC_ID_LOCAL:
         decided_parallelism = MAX(original_parallelism, 1L);
+        if (1 == original_parallelism) {
+          decided_parallelism = FTS_BUILD_DEFAULT_PARALLELISM;
+        }
         break;
       case share::schema::ObIndexType::INDEX_TYPE_DOC_ID_ROWKEY_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
         decided_parallelism = MAX(original_parallelism / 3, 1L);
+        if (1 == original_parallelism) {
+          decided_parallelism = FTS_BUILD_DEFAULT_PARALLELISM;
+        }
         break;
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:
