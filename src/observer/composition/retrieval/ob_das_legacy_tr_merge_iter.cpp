@@ -384,6 +384,11 @@ int ObDASLegacyTRMergeIter::create_sparse_retrieval_iter()
   sr_iter_param_.relevance_proj_expr_ = ir_ctdef_->relevance_proj_col_;
   sr_iter_param_.filter_expr_ = ir_ctdef_->match_filter_;
   sr_iter_param_.topk_limit_ = topk_limit_;
+  // A natural language MATCH that is only used as a boolean filter does not
+  // need the per document score: docs are valid iff they appear in the merged
+  // posting lists. Boolean mode keeps the relevance/filter machinery.
+  sr_iter_param_.need_calc_relevance_ = ir_ctdef_->need_calc_relevance()
+      && NATURAL_LANGUAGE_MODE == ir_ctdef_->mode_flag_;
   if (OB_NOT_NULL(ir_ctdef_->field_boost_expr_)) {
     ObDatum *boost_datum = nullptr;
     if (OB_FAIL(ir_ctdef_->field_boost_expr_->eval(*ir_rtdef_->eval_ctx_, boost_datum))) {

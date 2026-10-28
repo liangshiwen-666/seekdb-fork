@@ -275,6 +275,10 @@ int ObSRDaaTIterImpl::fill_merge_heap()
 {
   int ret = OB_SUCCESS;
   ObSRMergeItem item;
+  // When only the match existence matters (COUNT(*) ... WHERE MATCH(...) in
+  // natural language mode, no score filter) the per dimension score is never
+  // observed, so the scoring call and the score weighting can be skipped.
+  const bool skip_score = !iter_param_->need_calc_relevance_ && !iter_param_->need_filter();
   for (int64_t i = 0; OB_SUCC(ret) && i < next_round_cnt_; ++i) {
     const int64_t iter_idx = next_round_iter_idxes_[i];
     ObISRDaaTDimIter *dim_iter = nullptr;
@@ -286,10 +290,11 @@ int ObSRDaaTIterImpl::fill_merge_heap()
       } else {
         ret = OB_SUCCESS;
       }
-    } else if (OB_FAIL(dim_iter->get_curr_score(item.relevance_))) {
-    } else if (OB_NOT_NULL(iter_param_->dim_weights_) && FALSE_IT(item.relevance_ = item.relevance_ * iter_param_->field_boost_ * iter_param_->dim_weights_->at(iter_idx))) {
+    } else if (!skip_score && OB_FAIL(dim_iter->get_curr_score(item.relevance_))) {
+    } else if (!skip_score && OB_NOT_NULL(iter_param_->dim_weights_) && FALSE_IT(item.relevance_ = item.relevance_ * iter_param_->field_boost_ * iter_param_->dim_weights_->at(iter_idx))) {
     } else if (OB_FAIL(dim_iter->get_curr_id(iter_domain_ids_[iter_idx]))) {
     } else if (FALSE_IT(item.iter_idx_ = iter_idx)) {
+    } else if (skip_score && FALSE_IT(item.relevance_ = 0.0)) {
     } else if (OB_FAIL(merge_heap_->push(item))) {
     } else {
       LOG_DEBUG("push item to merge heap", K(ret), K(i), K(iter_idx), K(next_round_cnt_), K(item), K(iter_domain_ids_[iter_idx]));
@@ -315,13 +320,18 @@ int ObSRDaaTIterImpl::collect_dims_by_id(const ObDatum *&id_datum, double &relev
   int64_t iter_idx = 0;
   relevance = 0.0;
   got_valid_id = false;
+  // See fill_merge_heap(): with no observer of the score, a merged document is
+  // a match by construction (natural language mode) and the relevance
+  // collector (BM25 aggregation) does not need to run at all.
+  const bool skip_relevance = !iter_param_->need_calc_relevance_ && !iter_param_->need_filter();
 
   while (OB_SUCC(ret) && !merge_heap_->empty() && !curr_doc_end) {
     if (merge_heap_->is_unique_champion()) {
       curr_doc_end = true;
     }
     if (OB_FAIL(merge_heap_->top(top_item))) {
-    } else if (OB_FAIL(relevance_collector_->collect_one_dim(top_item->iter_idx_, top_item->relevance_))) {
+    } else if (!skip_relevance
+               && OB_FAIL(relevance_collector_->collect_one_dim(top_item->iter_idx_, top_item->relevance_))) {
     } else if (FALSE_IT(iter_idx = top_item->iter_idx_)) {
     } else if (OB_FAIL(merge_heap_->pop())) {
     } else {
@@ -333,6 +343,11 @@ int ObSRDaaTIterImpl::collect_dims_by_id(const ObDatum *&id_datum, double &relev
     id_datum = iter_domain_ids_[iter_idx];
     if (OB_ISNULL(id_datum)) {
       ret = OB_ERR_UNEXPECTED;
+    } else if (skip_relevance) {
+      relevance = 0.0;
+      got_valid_id = true;
+      if (OB_FAIL(process_collected_row(*id_datum, relevance))) {
+      }
     } else if (OB_FAIL(relevance_collector_->get_result(relevance, got_valid_id))) {
     } else if (got_valid_id && OB_FAIL(process_collected_row(*id_datum, relevance))) {
     }
