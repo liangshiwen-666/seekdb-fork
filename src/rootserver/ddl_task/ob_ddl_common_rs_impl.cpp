@@ -529,13 +529,20 @@ int ObDDLTaskUtil::generate_build_replica_sql(const int64_t data_table_id,
           }
         }
         const char *io_read_hint = " ";
+        // The fulltext aux tables are sorted by the token/doc id keys with the
+        // general_ci collation; encoding the sort keys to bytes lets the sort
+        // compare them with memcmp instead of the collation functions.
+        const char *newsort_hint =
+            (dest_table_schema->is_fts_index_aux() || dest_table_schema->is_fts_doc_word_aux())
+                ? "true"
+                : "false";
         if (dest_table_schema->is_vec_vid_rowkey_type()) {
           src_table_schema_version_hint_sql_string.reset();
         }
         if (OB_FAIL(ret)) {
         } else {
-          if (OB_FAIL(sql_string.assign_fmt("INSERT /*+ enable_parallel_dml parallel(%ld) opt_param('ddl_execution_id', %ld) opt_param('ddl_task_id', %ld) opt_param('enable_newsort', 'false') %.*s use_px */INTO `%.*s`.`%.*s` %.*s(%.*s) SELECT /*+ index(`%.*s` primary) %.*s */ %.*s from `%.*s`.`%.*s` %.*s as of snapshot %ld %.*s",
-              real_parallelism, execution_id, task_id,
+          if (OB_FAIL(sql_string.assign_fmt("INSERT /*+ enable_parallel_dml parallel(%ld) opt_param('ddl_execution_id', %ld) opt_param('ddl_task_id', %ld) opt_param('enable_newsort', '%s') %.*s use_px */INTO `%.*s`.`%.*s` %.*s(%.*s) SELECT /*+ index(`%.*s` primary) %.*s */ %.*s from `%.*s`.`%.*s` %.*s as of snapshot %ld %.*s",
+              real_parallelism, execution_id, task_id, newsort_hint,
               static_cast<int>(strlen(io_read_hint)), io_read_hint,
               static_cast<int>(new_dest_database_name.length()), new_dest_database_name.ptr(), static_cast<int>(new_dest_table_name.length()), new_dest_table_name.ptr(),
               static_cast<int>(partition_names.length()), partition_names.ptr(),

@@ -121,6 +121,15 @@ Local measurement (WSL2, 16 cores, 20k documents, same benchmark):
 The index contents are unchanged (same rows), and the `fts_index` mysqltest
 case that builds ik and beng indexes through `ALTER TABLE` passes.
 
+The DDL generated SQL also pins `opt_param('enable_newsort', 'false')` for
+every build. For the two fulltext aux tables the sort keys are the token string
+and the document id, so encoding the sort keys to bytes and comparing them with
+memcmp is valid and was measured to be slightly faster; the internal hint is
+now `true` for those two table types only (regular index builds are unchanged).
+
+Local A/B (four alternating benchmark pairs): build_total_sec 8.28 -> 8.16
+(-1.4%), build_ik_all_sec -1.4%, other build metrics within noise.
+
 ## Query: skip relevance work that nobody observes
 
 `MATCH(...)` used only as a boolean filter (e.g. `SELECT COUNT(*) ... WHERE
