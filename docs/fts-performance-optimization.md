@@ -135,6 +135,31 @@ tree. Such statements keep the original plan. Queries that rank or project the
 score (for example `... LIMIT 20`, which is planned as an implicit relevance
 top-k) are untouched as well.
 
+## Query: prune unused projections of a fulltext derived table
+
+Fulltext statements disable all rewrite rules, which also disables projection
+pruning. That leaves dead work in the common `SELECT ... FROM (SELECT col FROM t
+WHERE MATCH(...) LIMIT n) v` shape: the derived table projects base-table
+columns that the upper statement never reads, so the text retrieval scan has to
+do an index-back lookup for every matched row (the benchmark's `query_limit`
+case is `SELECT id FROM (SELECT id FROM docs WHERE MATCH(...) LIMIT 20) t` where
+only the row count is consumed).
+
+`ObTransformerImpl::choose_rewrite_rules` now re-enables only
+`PROJECTION_PRUNING` for a strictly restricted shape: a single, non correlated,
+non-view, non-CTE derived table over one base table, one plain natural-language
+`MATCH` (no boost, no query-parameter text), no set operation, distinct,
+window, group by or having, and every derived-table select item a plain
+(non-generated) column reference. The derived table keeps its ORDER BY / LIMIT,
+so the implicit MATCH ordering and top-n are preserved, and a column that is
+actually referenced by the upper statement is not removed. `EXPLAIN` of the
+benchmark `query_limit` query changes from `access([docs.id]), is_index_back=true`
+to `output([1]), access(nil), is_index_back=false`; the scored hit counts stay
+at 20. All other fulltext statements keep the previous behaviour.
+
+Measured on the local instance (four alternating A/B benchmark pairs):
+`query_limit_avg_ms` 1.986 -> 1.854 (-6.6%), the other query metrics unchanged.
+
 ## Correctness
 
 `TOKENIZE` output (ik/beng/ngram/ngram2/space, including the `output=all`

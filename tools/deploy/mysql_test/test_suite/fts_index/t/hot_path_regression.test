@@ -47,6 +47,15 @@ delete from docs where id = 6;
 select count(*) from docs where match(title, content) against('数据库');
 select id from docs where match(title, content) against('数据库') order by id;
 
+# unused projections of a fulltext derived table are pruned, so these queries
+# must keep returning exactly the rows/counts of the inner MATCH with LIMIT
+select count(*) from (select id from docs where match(title, content) against('数据库') limit 2) v;
+select count(*) from (select id from docs where match(title, content) against('数据库') limit 100) v;
+select count(*) from (select id, content from docs where match(title, content) against('数据库') limit 3) v;
+select sum(id) from (select id from docs where match(title, content) against('数据库') limit 3) v;
+select group_concat(id order by id) from (select id from docs where match(title, content) against('数据库') order by id limit 2) v;
+select count(id) from docs where match(title, content) against('数据库');
+
 --disable_warnings
 drop table if exists docs;
 --enable_warnings

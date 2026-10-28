@@ -520,6 +520,51 @@ void ObTransformerImpl::print_trans_stat()
   }
 }
 
+// Fulltext statements keep all rewrite rules disabled, which also disables the
+// projection pruning rule. For a very restricted statement shape - a single,
+// non correlated derived table over one base table whose only fulltext
+// expression is a plain natural language MATCH in the derived table - only the
+// plain column outputs of the derived table are pruned: the derived table keeps
+// its ORDER BY and LIMIT (so the implicit MATCH ordering is preserved), and if
+// a pruned column is really used by the upper statement it is kept anyway. This
+// avoids fetching base table columns that nobody consumes (index back).
+static bool is_projection_pruning_safe_for_fulltext(const ObDMLStmt &stmt)
+{
+  bool safe = false;
+  if (stmt.is_select_stmt() && 1 == stmt.get_table_size() && !stmt.has_subquery()
+      && !stmt.has_for_update() && !stmt.is_contains_assignment()
+      && !stmt.is_calc_found_rows() && stmt.get_match_exprs().empty()) {
+    const ObSelectStmt &upper = static_cast<const ObSelectStmt &>(stmt);
+    const TableItem *view = stmt.get_table_item(0);
+    if (!upper.is_set_stmt() && !upper.has_distinct() && !upper.has_window_function()
+        && !upper.has_recursive_cte() && nullptr != view && view->is_generated_table()
+        && TableItem::NOT_CTE == view->cte_type_ && !view->is_view_table_
+        && view->exec_params_.empty() && nullptr != view->ref_query_) {
+      const ObSelectStmt &child = *view->ref_query_;
+      const TableItem *table = 1 == child.get_table_size() ? child.get_table_item(0) : nullptr;
+      if (nullptr != table && table->is_basic_table() && !child.is_set_stmt()
+          && !child.has_subquery() && !child.has_for_update()
+          && !child.is_contains_assignment() && !child.is_calc_found_rows()
+          && !child.has_distinct() && !child.has_group_by() && !child.has_having()
+          && 0 == child.get_aggr_item_size() && !child.has_window_function()
+          && !child.has_recursive_cte() && 1 == child.get_match_exprs().count()) {
+        const ObMatchFunRawExpr *match = child.get_match_exprs().at(0);
+        safe = nullptr != match && !match->is_es_match()
+            && NATURAL_LANGUAGE_MODE == match->get_mode_flag()
+            && match->get_columns_boosts().empty() && nullptr == match->get_param_text_expr();
+        for (int64_t i = 0; safe && i < child.get_select_item_size(); ++i) {
+          const ObRawExpr *expr = child.get_select_item(i).expr_;
+          // Only prune plain column references: MATCH expressions, volatile
+          // expressions and generated columns are never removed.
+          safe = nullptr != expr && expr->is_column_ref_expr()
+              && !static_cast<const ObColumnRefRawExpr *>(expr)->is_generated_column();
+        }
+      }
+    }
+  }
+  return safe;
+}
+
 int ObTransformerImpl::choose_rewrite_rules(ObDMLStmt *stmt, uint64_t &need_types)
 {
   int ret = OB_SUCCESS;
@@ -538,6 +583,20 @@ int ObTransformerImpl::choose_rewrite_rules(ObDMLStmt *stmt, uint64_t &need_type
   } else {
     if (func.contain_geometry_values_ || func.contain_fulltext_search_ || func.contain_vec_index_approx_) {
       disable_list = ObTransformRule::ALL_TRANSFORM_RULES;
+      // Keep every fulltext rewrite disabled, but allow pruning the unused
+      // plain column outputs of a restricted fulltext derived table: the
+      // derived table keeps its ORDER BY / LIMIT (implicit MATCH ordering), and
+      // only columns that nobody consumes are removed, so that the text
+      // retrieval scan does not have to fetch base table rows (index back).
+      if (func.contain_fulltext_search_ && !func.contain_geometry_values_
+          && !func.contain_vec_index_approx_ && !func.contain_enum_set_values_
+          && !func.contain_for_update_ && !func.contain_dml_with_doc_id_
+          && !func.update_global_index_
+          && is_projection_pruning_safe_for_fulltext(*stmt)) {
+        uint64_t projection_only = 0;
+        ObTransformRule::add_trans_type(projection_only, PROJECTION_PRUNING);
+        disable_list &= ~projection_only;
+      }
     }
     if (func.contain_enum_set_values_) {
       uint64_t enum_set_enable_list = 0;
