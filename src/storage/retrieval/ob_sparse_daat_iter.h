@@ -90,12 +90,16 @@ protected:
   virtual int collect_dims_by_id(const ObDatum *&id_datum, double &relevance, bool &got_valid_id);
   virtual int process_collected_row(const ObDatum &id_datum, const double relevance);
   virtual int filter_on_demand(const int64_t count, const double relevance, bool &need_project);
+  // Fast path used when the scan only needs the number of matched rows.
+  int count_only_get_next_rows(const int64_t capacity, int64_t &count);
   virtual int cache_result(int64_t &count, const ObDatum &id_datum, const double relevance);
   virtual int project_results(const int64_t count);
   int init_merge_heap(const int64_t count);
 protected:
   ObIAllocator *iter_allocator_;
   ObSparseRetrievalMergeParam *iter_param_;
+  bool count_only_inited_;
+  ObFixedArray<int8_t, ObIAllocator> count_only_active_;
   ObIArray<ObISRDaaTDimIter *> *dim_iters_;
   ObSRMergeCmp merge_cmp_;
   ObSRMergeHeap *merge_heap_;

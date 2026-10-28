@@ -73,6 +73,8 @@ ObSRDaaTIterImpl::ObSRDaaTIterImpl()
   : ObISparseRetrievalMergeIter(),
     iter_allocator_(nullptr),
     iter_param_(nullptr),
+    count_only_inited_(false),
+    count_only_active_(),
     dim_iters_(nullptr),
     merge_cmp_(),
     merge_heap_(nullptr),
@@ -114,6 +116,9 @@ int ObSRDaaTIterImpl::init(
     } else if (FALSE_IT(iter_domain_ids_.set_allocator(iter_allocator_))) {
     } else if (OB_FAIL(iter_domain_ids_.init(dim_iters.count()))) {
     } else if (OB_FAIL(iter_domain_ids_.prepare_allocate(dim_iters.count()))) {
+    } else if (FALSE_IT(count_only_active_.set_allocator(iter_allocator_))) {
+    } else if (OB_FAIL(count_only_active_.init(dim_iters.count()))) {
+    } else if (OB_FAIL(count_only_active_.prepare_allocate(dim_iters.count()))) {
     } else if (FALSE_IT(next_round_iter_idxes_.set_allocator(iter_allocator_))) {
     } else if (OB_FAIL(next_round_iter_idxes_.init(dim_iters.count()))) {
     } else if (OB_FAIL(next_round_iter_idxes_.prepare_allocate(dim_iters.count()))) {
@@ -152,6 +157,8 @@ void ObSRDaaTIterImpl::reset()
     relevance_collector_ = nullptr;
   }
   iter_domain_ids_.reset();
+  count_only_active_.reset();
+  count_only_inited_ = false;
   buffered_domain_ids_.reset();
   buffered_relevances_.reset();
   next_round_iter_idxes_.reset();
@@ -172,6 +179,7 @@ void ObSRDaaTIterImpl::reuse(const bool switch_tablet)
     for (int64_t i = 0; i < next_round_cnt_; ++i) {
       next_round_iter_idxes_[i] = i;
     }
+    count_only_inited_ = false;
   }
   if (OB_NOT_NULL(relevance_collector_)) {
     relevance_collector_->reuse();
@@ -213,6 +221,107 @@ int ObSRDaaTIterImpl::get_next_row()
   return ret;
 }
 
+// Fast path for COUNT(*)-only statements (natural language mode): the plan
+// only needs the number of matched rows, so the merge can be done with a
+// small linear scan over the dimension iterators instead of the generic heap
+// + relevance collection + row projection machinery.
+// Fast path for COUNT(*)-only statements (natural language mode): the plan
+// only needs the number of matched rows, so the merge can be done with a
+// small linear scan over the dimension iterators instead of the generic heap
+// + relevance collection + row projection machinery.
+int ObSRDaaTIterImpl::count_only_get_next_rows(const int64_t capacity, int64_t &count)
+{
+  int ret = OB_SUCCESS;
+  count = 0;
+  const int64_t dim_cnt = dim_iters_->count();
+  const int64_t real_capacity = MIN(capacity, iter_param_->max_batch_size_);
+  if (OB_UNLIKELY(!count_only_inited_)) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < dim_cnt; ++i) {
+      ObISRDaaTDimIter *dim_iter = dim_iters_->at(i);
+      if (OB_ISNULL(dim_iter)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(dim_iter->get_next_row())) {
+        if (OB_ITER_END == ret) {
+          ret = OB_SUCCESS;
+          count_only_active_[i] = 0;
+        }
+      } else if (OB_FAIL(dim_iter->get_curr_id(iter_domain_ids_[i]))) {
+      } else {
+        count_only_active_[i] = 1;
+      }
+    }
+    count_only_inited_ = true;
+  }
+  while (OB_SUCC(ret) && count < real_capacity) {
+    // 1. find the smallest current id among the active dimension iterators
+    int64_t min_idx = -1;
+    for (int64_t i = 0; OB_SUCC(ret) && i < dim_cnt; ++i) {
+      if (0 == count_only_active_[i]) {
+        continue;
+      } else if (min_idx < 0) {
+        min_idx = i;
+      } else {
+        ObSRMergeItem left_item;
+        ObSRMergeItem right_item;
+        int64_t cmp_ret = 0;
+        left_item.iter_idx_ = min_idx;
+        right_item.iter_idx_ = i;
+        if (OB_FAIL(merge_cmp_.cmp(left_item, right_item, cmp_ret))) {
+        } else if (cmp_ret > 0) {
+          min_idx = i;
+        }
+      }
+    }
+    if (OB_FAIL(ret)) {
+      break;
+    } else if (min_idx < 0) {
+      if (0 == count) {
+        ret = OB_ITER_END;
+      }
+      break;
+    } else {
+      // 2. collect every iterator whose current id equals the minimum before
+      //    advancing any of them (advancing changes the current id)
+      int64_t equal_cnt = 0;
+      int64_t equal_idxes[256];
+      equal_idxes[equal_cnt++] = min_idx;
+      for (int64_t i = 0; OB_SUCC(ret) && i < dim_cnt; ++i) {
+        if (0 == count_only_active_[i] || i == min_idx) {
+          continue;
+        } else {
+          ObSRMergeItem left_item;
+          ObSRMergeItem right_item;
+          int64_t cmp_ret = 0;
+          left_item.iter_idx_ = min_idx;
+          right_item.iter_idx_ = i;
+          if (OB_FAIL(merge_cmp_.cmp(left_item, right_item, cmp_ret))) {
+          } else if (0 == cmp_ret && equal_cnt < 256) {
+            equal_idxes[equal_cnt++] = i;
+          }
+        }
+      }
+      // 3. advance those iterators
+      for (int64_t k = 0; OB_SUCC(ret) && k < equal_cnt; ++k) {
+        const int64_t idx = equal_idxes[k];
+        ObISRDaaTDimIter *dim_iter = dim_iters_->at(idx);
+        if (OB_ISNULL(dim_iter)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(dim_iter->get_next_row())) {
+          if (OB_ITER_END == ret) {
+            ret = OB_SUCCESS;
+            count_only_active_[idx] = 0;
+          }
+        } else if (OB_FAIL(dim_iter->get_curr_id(iter_domain_ids_[idx]))) {
+        }
+      }
+      if (OB_SUCC(ret)) {
+        ++count;
+        ++output_row_cnt_;
+      }
+    }
+  }
+  return ret;
+}
 int ObSRDaaTIterImpl::get_next_rows(const int64_t capacity, int64_t &count)
 {
   int ret = OB_SUCCESS;
@@ -224,6 +333,9 @@ int ObSRDaaTIterImpl::get_next_rows(const int64_t capacity, int64_t &count)
     ret = OB_ITER_END;
   } else if (iter_param_->limit_param_->is_valid() && output_row_cnt_ >= iter_param_->limit_param_->limit_) {
     ret = OB_ITER_END;
+  } else if (iter_param_->count_only_ && OB_FAIL(count_only_get_next_rows(capacity, count))) {
+  } else if (iter_param_->count_only_) {
+    // done by the count-only fast path
   } else if (OB_FAIL(pre_process())) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
     } else {
@@ -240,7 +352,9 @@ int ObSRDaaTIterImpl::get_next_rows(const int64_t capacity, int64_t &count)
     }
 
     if (OB_SUCC(ret) || OB_ITER_END == ret) {
-      if (count > 0 && OB_FAIL(project_results(count))) {
+      // Count-only scans only need the number of matched rows; the row values
+      // are not observed downstream, so skip the projection.
+      if (count > 0 && !iter_param_->count_only_ && OB_FAIL(project_results(count))) {
       }
     }
 
@@ -286,8 +400,9 @@ int ObSRDaaTIterImpl::fill_merge_heap()
       } else {
         ret = OB_SUCCESS;
       }
-    } else if (OB_FAIL(dim_iter->get_curr_score(item.relevance_))) {
-    } else if (OB_NOT_NULL(iter_param_->dim_weights_) && FALSE_IT(item.relevance_ = item.relevance_ * iter_param_->field_boost_ * iter_param_->dim_weights_->at(iter_idx))) {
+    } else if (iter_param_->count_only_ && FALSE_IT(item.relevance_ = 0.0)) {
+    } else if (!iter_param_->count_only_ && OB_FAIL(dim_iter->get_curr_score(item.relevance_))) {
+    } else if (!iter_param_->count_only_ && OB_NOT_NULL(iter_param_->dim_weights_) && FALSE_IT(item.relevance_ = item.relevance_ * iter_param_->field_boost_ * iter_param_->dim_weights_->at(iter_idx))) {
     } else if (OB_FAIL(dim_iter->get_curr_id(iter_domain_ids_[iter_idx]))) {
     } else if (FALSE_IT(item.iter_idx_ = iter_idx)) {
     } else if (OB_FAIL(merge_heap_->push(item))) {
@@ -321,7 +436,7 @@ int ObSRDaaTIterImpl::collect_dims_by_id(const ObDatum *&id_datum, double &relev
       curr_doc_end = true;
     }
     if (OB_FAIL(merge_heap_->top(top_item))) {
-    } else if (OB_FAIL(relevance_collector_->collect_one_dim(top_item->iter_idx_, top_item->relevance_))) {
+    } else if (!iter_param_->count_only_ && OB_FAIL(relevance_collector_->collect_one_dim(top_item->iter_idx_, top_item->relevance_))) {
     } else if (FALSE_IT(iter_idx = top_item->iter_idx_)) {
     } else if (OB_FAIL(merge_heap_->pop())) {
     } else {
@@ -333,6 +448,11 @@ int ObSRDaaTIterImpl::collect_dims_by_id(const ObDatum *&id_datum, double &relev
     id_datum = iter_domain_ids_[iter_idx];
     if (OB_ISNULL(id_datum)) {
       ret = OB_ERR_UNEXPECTED;
+    } else if (iter_param_->count_only_) {
+      relevance = 0.0;
+      got_valid_id = true;
+      if (OB_FAIL(process_collected_row(*id_datum, relevance))) {
+      }
     } else if (OB_FAIL(relevance_collector_->get_result(relevance, got_valid_id))) {
     } else if (got_valid_id && OB_FAIL(process_collected_row(*id_datum, relevance))) {
     }
@@ -393,11 +513,14 @@ int ObSRDaaTIterImpl::cache_result(int64_t &count, const ObDatum &id_datum, cons
   if (limit_param->is_valid() && input_row_cnt_ <= offset) {
     // TODO: Maybe we should not process offset logic here
     // don't need to project
-  } else if (OB_UNLIKELY(count >= buffered_domain_ids_.count() || count >= buffered_relevances_.count())) {
+  } else if (!iter_param_->count_only_
+             && OB_UNLIKELY(count >= buffered_domain_ids_.count() || count >= buffered_relevances_.count())) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    buffered_domain_ids_[count].from_datum(id_datum);
-    buffered_relevances_[count] = relevance;
+    if (!iter_param_->count_only_) {
+      buffered_domain_ids_[count].from_datum(id_datum);
+      buffered_relevances_[count] = relevance;
+    }
     ++count;
     ++output_row_cnt_;
     if (limit_param->is_valid() && output_row_cnt_ >= limit) {
