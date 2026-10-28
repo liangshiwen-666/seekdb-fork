@@ -201,9 +201,10 @@ int ObExprTokenize::parse_param(const ObExpr &expr,
   ObDatum *parser_params_datum;
   ObString raw_parser_name = ObString::make_string(OB_DEFAULT_FULLTEXT_PARSER_NAME);
 
-  ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
-  
-  MultimodeAlloctor temp_allocator(tmp_alloc_g.get_allocator());
+  // The caller already provides a per evaluation arena; the temporary
+  // allocator guard here only added another allocation on every TOKENIZE()
+  // call for the parser property parsing.
+  MultimodeAlloctor temp_allocator(allocator);
 
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;

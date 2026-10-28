@@ -37,7 +37,8 @@ Local measurements on the benchmark workload (20k documents) showed:
    `ob_fts_parser_helper.cpp`, `ob_fts_parser_property.cpp`): keep the parsed
    `ObFTParserProperty` in `TokenizeParam` and initialize the parse helper from
    it directly, avoiding a json serialize + parse round trip per `TOKENIZE()`
-   call.
+   call. The per-call `ObEvalCtx::TempAllocGuard` in `parse_param` is gone as
+   well: the caller already passes a per evaluation arena.
 5. **Per-word processing** (`ob_fts_stop_word.cpp`):
    - stopword check: skip the per-word arena + charset conversion when the
      charsets are identical (conversion is the identity mapping);
