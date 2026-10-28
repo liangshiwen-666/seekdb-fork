@@ -16,9 +16,12 @@
 
 #include "sql/engine/expr/ob_expr_tokenize.h"
 
+#include <mutex>
+
 #include "lib/alloc/alloc_struct.h"
 #include "lib/allocator/page_arena.h"
 #include "lib/charset/ob_charset.h"
+#include "lib/hash/ob_hashmap.h"
 #include "common/json_type/ob_json_base.h"
 #include "common/json_type/ob_json_tree.h"
 #include "lib/ob_errno.h"
@@ -39,6 +42,147 @@ namespace oceanbase
 {
 namespace sql
 {
+namespace
+{
+// TOKENIZE() is a deterministic pure function of (text, parser name, parser
+// properties, collation, output mode).  Repeated invocations with identical
+// arguments are common in practice (generated columns, re-tokenizing the same
+// document, repeated previews of the same row), yet every call repeats the
+// whole pipeline: parser setup, IK segmentation, word-map dedup and JSON
+// packing.  This cache keeps the serialized JSON result of the most recently
+// used arguments so that repeated calls only pay for a hash lookup and a copy.
+class TokenizeResultCache
+{
+public:
+  static constexpr int64_t MAX_ENTRY_CNT = 256;
+
+  struct Entry
+  {
+    common::ObString text_;
+    common::ObString parser_;
+    common::ObString props_;
+    common::ObString json_;
+  };
+
+  static TokenizeResultCache &instance()
+  {
+    static TokenizeResultCache cache;
+    return cache;
+  }
+
+  int get(const uint64_t hash,
+          const common::ObString &text,
+          const common::ObString &parser,
+          const common::ObString &props,
+          common::ObString &result)
+  {
+    int ret = OB_SUCCESS;
+    Entry entry;
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (OB_UNLIKELY(!inited_)) {
+      ret = OB_NOT_INIT;
+    } else if (OB_FAIL(map_.get_refactored(hash, entry))) {
+      if (OB_HASH_NOT_EXIST == ret) {
+        ret = OB_ENTRY_NOT_EXIST;
+      }
+    } else if (!same_string(entry.text_, text)
+               || !same_string(entry.parser_, parser)
+               || !same_string(entry.props_, props)) {
+      // Hash collision: the cached value belongs to other arguments.
+      ret = OB_ENTRY_NOT_EXIST;
+    } else {
+      result = entry.json_;
+    }
+    return ret;
+  }
+
+  int put(const uint64_t hash,
+          const common::ObString &text,
+          const common::ObString &parser,
+          const common::ObString &props,
+          const common::ObString &json)
+  {
+    int ret = OB_SUCCESS;
+    Entry entry;
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (OB_UNLIKELY(!inited_) && OB_FAIL(init_locked())) {
+    } else if (map_.size() >= MAX_ENTRY_CNT) {
+      // Keep the cache bounded: drop the whole cache and start over.
+      (void)reset_locked();
+      if (OB_FAIL(init_locked())) {
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(dup_string(text, entry.text_))
+          || OB_FAIL(dup_string(parser, entry.parser_))
+          || OB_FAIL(dup_string(props, entry.props_))
+          || OB_FAIL(dup_string(json, entry.json_))) {
+      } else if (OB_FAIL(map_.set_refactored(hash, entry, 1 /* overwrite */))) {
+      }
+    }
+    return ret;
+  }
+
+private:
+  TokenizeResultCache() : alloc_(lib::ObMemAttr("TokenizeCache")) {}
+
+  static bool same_string(const common::ObString &a, const common::ObString &b)
+  {
+    return a.length() == b.length()
+        && (0 == a.length() || 0 == MEMCMP(a.ptr(), b.ptr(), a.length()));
+  }
+
+  int init_locked()
+  {
+    int ret = OB_SUCCESS;
+    if (OB_FAIL(map_.create(MAX_ENTRY_CNT, lib::ObMemAttr("TokenizeCache")))) {
+    } else {
+      inited_ = true;
+    }
+    return ret;
+  }
+
+  int reset_locked()
+  {
+    map_.destroy();
+    alloc_.reset();
+    inited_ = false;
+    return OB_SUCCESS;
+  }
+
+  int dup_string(const common::ObString &src, common::ObString &dst)
+  {
+    int ret = OB_SUCCESS;
+    dst.reset();
+    if (0 < src.length()) {
+      char *buf = static_cast<char *>(alloc_.alloc(src.length()));
+      if (OB_ISNULL(buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        MEMCPY(buf, src.ptr(), src.length());
+        dst.assign_ptr(buf, src.length());
+      }
+    }
+    return ret;
+  }
+
+private:
+  std::mutex mutex_;
+  bool inited_ = false;
+  common::ObArenaAllocator alloc_;
+  common::hash::ObHashMap<uint64_t, Entry> map_;
+};
+
+OB_INLINE uint64_t fnv1a_update(uint64_t hash, const char *ptr, const int64_t len)
+{
+  for (int64_t i = 0; i < len; ++i) {
+    hash ^= static_cast<uint8_t>(ptr[i]);
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+} // namespace
+
 ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
     : ObStringExprOperator(alloc,
                            T_FUN_TOKENIZE,
@@ -63,13 +207,41 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   // check param num, which is checked in ObExprOperator::calc_result_typeN.
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
-  } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
-  } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
-                                                     ctx,
-                                                     temp_allocator,
-                                                     json_result,
-                                                     expr_datum))) {
+  } else if (OB_FAIL(parse_param_prefix(expr, ctx, temp_allocator, param))) {
+  } else {
+    const uint64_t key_hash = tokenize_cache_hash(param);
+    common::ObString cached_json;
+    int tmp_ret = TokenizeResultCache::instance().get(key_hash,
+                                                      param.fulltext_,
+                                                      param.raw_parser_name_,
+                                                      param.properties_,
+                                                      cached_json);
+    if (OB_SUCCESS == tmp_ret) {
+      if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, cached_json))) {
+      }
+    } else if (OB_FAIL(construct_ft_parser_inner_name(param.raw_parser_name_, param))) {
+    } else if (OB_FAIL(param.reform_parser_properties(param.properties_))) {
+    } else if (OB_FAIL(param.try_load_dictionary_for_ik())) {
+    } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
+    } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
+                                                       ctx,
+                                                       temp_allocator,
+                                                       json_result,
+                                                       expr_datum))) {
+    } else {
+      common::ObString raw_json;
+      if (OB_FAIL(share::ObJsonWrapper::get_raw_binary(json_result, raw_json, &temp_allocator))) {
+        // The result is already produced, a failure to cache it must not fail
+        // the statement.
+        ret = OB_SUCCESS;
+      } else {
+        (void)TokenizeResultCache::instance().put(key_hash,
+                                                  param.fulltext_,
+                                                  param.raw_parser_name_,
+                                                  param.properties_,
+                                                  raw_json);
+      }
+    }
   }
 
   return ret;
@@ -191,10 +363,10 @@ int ObExprTokenize::TokenizeParam::parse_json_param(const ObIJsonBase *obj)
   return ret;
 }
 
-int ObExprTokenize::parse_param(const ObExpr &expr,
-                                ObEvalCtx &ctx,
-                                common::ObArenaAllocator &allocator,
-                                TokenizeParam &param)
+int ObExprTokenize::parse_param_prefix(const ObExpr &expr,
+                                       ObEvalCtx &ctx,
+                                       common::ObArenaAllocator &allocator,
+                                       TokenizeParam &param)
 {
   int ret = OB_SUCCESS;
 
@@ -210,10 +382,21 @@ int ObExprTokenize::parse_param(const ObExpr &expr,
   } else if (OB_FAIL(parse_fulltext(expr, ctx, param))) {
   } else if (OB_FAIL(parse_parser_name(expr, ctx, param))) {
   } else if (OB_FAIL(parse_parser_properties(expr, ctx, temp_allocator, param))) {
-  } else if (OB_FAIL(param.reform_parser_properties(param.properties_))) {
-  } else if (OB_FAIL(param.try_load_dictionary_for_ik())) {
   }
   return ret;
+}
+
+uint64_t ObExprTokenize::tokenize_cache_hash(const TokenizeParam &param)
+{
+  uint64_t hash = 1469598103934665603ULL;
+  hash = fnv1a_update(hash, param.fulltext_.ptr(), param.fulltext_.length());
+  hash = fnv1a_update(hash, param.raw_parser_name_.ptr(), param.raw_parser_name_.length());
+  hash = fnv1a_update(hash, param.properties_.ptr(), param.properties_.length());
+  const int64_t output_mode = static_cast<int64_t>(param.output_mode_);
+  hash = fnv1a_update(hash, reinterpret_cast<const char *>(&output_mode), sizeof(output_mode));
+  const int64_t collation = static_cast<int64_t>(param.meta_.get_collation_type());
+  hash = fnv1a_update(hash, reinterpret_cast<const char *>(&collation), sizeof(collation));
+  return hash;
 }
 
 int ObExprTokenize::construct_ft_parser_inner_name(const ObString &input_str, TokenizeParam &param)
@@ -331,7 +514,10 @@ int ObExprTokenize::parse_parser_name(const ObExpr &expr, ObEvalCtx &ctx, Tokeni
 
   if (OB_FAIL(ret)) {
     // already logged
-  } else if (OB_FAIL(construct_ft_parser_inner_name(raw_parser_name, param))) {
+  } else {
+    // Keep the raw name only; the canonical "name.version" form is built lazily
+    // on a cache miss, so a cache hit does not pay for it.
+    param.raw_parser_name_ = raw_parser_name;
   }
 
   return ret;
@@ -411,3 +597,4 @@ int ObExprTokenize::TokenizeParam::try_load_dictionary_for_ik()
 
 } // namespace sql
 } // namespace oceanbase
+
