@@ -125,20 +125,41 @@ int ObGenDicLoader::get_dic_loader(const ObString &parser_name,
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(dic_loader_key.init(parser_name, charset))) {
   } else {
-    TCWLockGuard guard(lock_);
-    if (OB_FAIL(dic_loader_map_.get_refactored(dic_loader_key, dic_loader))) {
-      if (OB_HASH_NOT_EXIST == ret) {
-        if (OB_FAIL(gen_dic_loader(dic_loader_key, dic_loader))) {
-        } else if (OB_ISNULL(dic_loader)) {
-          ret = OB_ERR_UNEXPECTED;
-        } else if (OB_FAIL(dic_loader_map_.set_refactored(dic_loader_key, dic_loader))) {
-        } else if (OB_FALSE_IT(dic_loader->inc_ref())) {
-        } else if (OB_FAIL(loader_handle.set_loader(dic_loader))) {
+    // The dictionary loader registry never replaces a published pointer, so the
+    // (very common) cache hit can be served under a read lock. Only a missing
+    // key needs the exclusive lock to publish a new loader.
+    bool found = false;
+    {
+      TCRLockGuard read_guard(lock_);
+      if (OB_FAIL(read_guard.get_ret())) {
+      } else if (OB_SUCC(dic_loader_map_.get_refactored(dic_loader_key, dic_loader))) {
+        if (OB_FAIL(loader_handle.set_loader(dic_loader))) {
+        } else {
+          found = true;
         }
+      } else if (OB_HASH_NOT_EXIST == ret) {
+        ret = OB_SUCCESS;
       } else {
         ret = OB_ERR_UNEXPECTED;
       }
-    } else if (OB_FAIL(loader_handle.set_loader(dic_loader))) {
+    }
+    if (OB_SUCC(ret) && !found) {
+      TCWLockGuard guard(lock_);
+      if (OB_FAIL(guard.get_ret())) {
+      } else if (OB_SUCC(dic_loader_map_.get_refactored(dic_loader_key, dic_loader))) {
+        // Another thread may have published the same loader while the lock was
+        // released for the slow path.
+        if (OB_FAIL(loader_handle.set_loader(dic_loader))) {
+        }
+      } else if (OB_HASH_NOT_EXIST != ret) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(gen_dic_loader(dic_loader_key, dic_loader))) {
+      } else if (OB_ISNULL(dic_loader)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(dic_loader_map_.set_refactored(dic_loader_key, dic_loader))) {
+      } else if (OB_FALSE_IT(dic_loader->inc_ref())) {
+      } else if (OB_FAIL(loader_handle.set_loader(dic_loader))) {
+      }
     }
   }
   return ret;

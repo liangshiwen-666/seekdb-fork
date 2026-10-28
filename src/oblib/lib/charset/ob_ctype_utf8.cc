@@ -381,11 +381,26 @@ static int ob_strnncollsp_utf8mb4(const ObCharsetInfo *cs,
   ob_wc_t src_wc = 0, dst_wc = 0;
   const unsigned char *se= src + srclen, *te= dst + dstlen;
   ObUnicaseInfo *uni_plane= cs->caseinfo;
+  // Sort keys are often compared against an identical key (very common when a
+  // secondary index carries repeated values). Identical bytes compare equal
+  // under both trailing space policies, so skip decoding them twice.
+  if (srclen == dstlen && (0 == srclen || src == dst || 0 == memcmp(src, dst, srclen))) {
+    return 0;
+  }
   while ( src < se && dst < te ) {
-    int s_res= ob_mb_wc_utf8mb4(cs, &src_wc, src, se);
-    int t_res= ob_mb_wc_utf8mb4(cs, &dst_wc, dst, te);
-    if ( s_res <= 0 || t_res <= 0 ) {
-      return bincmp_utf8mb4(src, se, dst, te);
+    int s_res = 1;
+    int t_res = 1;
+    if (*src < 0x80 && *dst < 0x80) {
+      // Plain ASCII bytes are complete single byte UTF-8 characters; the
+      // weight folding below is still applied.
+      src_wc = *src;
+      dst_wc = *dst;
+    } else {
+      s_res = ob_mb_wc_utf8mb4(cs, &src_wc, src, se);
+      t_res = ob_mb_wc_utf8mb4(cs, &dst_wc, dst, te);
+      if ( s_res <= 0 || t_res <= 0 ) {
+        return bincmp_utf8mb4(src, se, dst, te);
+      }
     }
     ob_tosort_unicode(uni_plane, &src_wc, cs->state);
     ob_tosort_unicode(uni_plane, &dst_wc, cs->state);

@@ -51,7 +51,11 @@ private:
   ObObjMeta meta_;
 };
 
-typedef common::hash::ObHashMap<ObFTWord, int64_t> ObFTWordMap;
+// The word map is always owned by a single tokenize/build call (one per
+// document during index build, one per TOKENIZE() call, one per query
+// execution), so the per-bucket latch of the default hash map is pure
+// overhead on this hot path.
+typedef common::hash::ObHashMap<ObFTWord, int64_t, common::hash::NoPthreadDefendMode> ObFTWordMap;
 
 class ObAddWordFlag final
 {

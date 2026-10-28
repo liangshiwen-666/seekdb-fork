@@ -57,6 +57,21 @@ Local measurements on the benchmark workload (20k documents) showed:
    Single-tokenize hot path measurement: net tokenize time (SQL overhead
    removed) 0.086 -> 0.061 ms, about -29%; the benchmark `tokenize_ik` metric
    is about -13%. TOKENIZE output is byte identical.
+7. **Cheaper synchronization and comparisons on the hot paths**:
+   - `ObGenDicLoader::get_dic_loader` served a cache hit by taking the
+     `TCRWLock` in write mode, which showed up as `TCRWLock::wrlock` in the
+     tokenize profile. The registry never replaces a published loader pointer,
+     so hits are now served under a read lock; only a missing key takes the
+     write lock and re-checks after publishing.
+   - `ObFTWordMap` (the per-call / per-document word-frequency map) is a local
+     object owned by one thread in every use (index row generation, TOKENIZE,
+     query tokenization), so it no longer pays the per-bucket latch of the
+     default hash map; the query tokenization sites use the same type.
+   - The dictionary hash map's fixed three-slot probe replaced the modulo on
+     wrap-around by a conditional subtraction (capacity is at least 101).
+   - `ob_strnncollsp_utf8mb4` returns equal immediately for identical byte
+     sequences (very common when sorting index keys) and decodes plain ASCII
+     pairs without the UTF-8 decoder; weight folding is unchanged.
 
 No tokenization rules, dictionary contents, match semantics or result formats
 are changed.

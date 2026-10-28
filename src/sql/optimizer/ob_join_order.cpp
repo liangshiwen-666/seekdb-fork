@@ -7525,7 +7525,7 @@ int JoinPath::pre_check_nlj_can_px_batch_rescan(bool &can_px_batch_rescan) const
              || NESTED_LOOP_JOIN != join_algo_ || !is_nlj_with_param_down()
              || IS_SEMI_ANTI_JOIN(join_type_)
              || config::_enable_px_ordered_coord()) {
-    /* when _enable_px_ordered_coord is enabled, px batch rescan is disabled due to is_task_order(）exchange op */
+    /* when _enable_px_ordered_coord is enabled, px batch rescan is disabled due to is_task_order(锛塭xchange op */
   } else if (is_right_need_exchange()) {
     can_px_batch_rescan = true;
   } else if (right_path_->is_join_path() &&
@@ -13392,7 +13392,7 @@ int ObJoinOrder::get_used_stat_partitions(const uint64_t ref_table_id,
                                                                        partition_limit))) {
   } else {
     /**
-    * The priority for using statistics is as follows：
+    * The priority for using statistics is as follows锛?
     *    0. Single partition table just use statistics of this partition;
     *    1. Table without any partition pruning use the table statistics;
     *    2. a. PARTITION_LEVEL_ONE table use level one partition statistics;
@@ -16711,7 +16711,7 @@ int ObJoinOrder::get_query_tokens(ObMatchFunRawExpr *match_expr,
     const ObObjMeta &key_meta = match_expr->get_search_key()->get_result_meta();
     storage::ObFTParseHelper tokenize_helper;
     common::ObSEArray<ObFTWord, 16> tokens;
-    hash::ObHashMap<ObFTWord, int64_t> token_map;
+    storage::ObFTWordMap token_map;
     int64_t doc_length = 0;
     const int64_t ft_word_bkt_cnt = MAX(search_text_string.length() / 10, 2);
     if (search_text_string.length() == 0) {
@@ -16725,7 +16725,7 @@ int ObJoinOrder::get_query_tokens(ObMatchFunRawExpr *match_expr,
                            doc_length,
                            token_map))) {
     } else {
-      for (hash::ObHashMap<ObFTWord, int64_t>::const_iterator iter = token_map.begin();
+      for (storage::ObFTWordMap::const_iterator iter = token_map.begin();
           OB_SUCC(ret) && iter != token_map.end();
           ++iter) {
         const ObFTWord &token = iter->first;
