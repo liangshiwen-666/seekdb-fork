@@ -76,6 +76,15 @@ protected:
   INHERIT_TO_STRING_KV("ObTextTokenizer", ObTextTokenizer, K_(trav_pos), KP_(curr_token_ptr));
 private:
   bool found_delimiter();
+  inline int64_t get_next_char_len(const char *doc, const uint32_t doc_len) const
+  {
+    const unsigned char ch = static_cast<unsigned char>(doc[trav_pos_]);
+    // ASCII compatible charsets encode a plain ASCII byte as itself, so the
+    // (heavily used) ASCII case needs no charset dispatch.
+    return (ch < 0x80 && 1 == cs_->mbminlen)
+        ? 1
+        : ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+  }
   const char *get_trav_ptr() { return input_doc_->ptr_ + trav_pos_; }
   uint32_t get_input_buf_len() { return input_doc_->len_; }
 private:

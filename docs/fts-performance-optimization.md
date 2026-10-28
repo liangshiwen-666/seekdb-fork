@@ -72,6 +72,21 @@ Local measurements on the benchmark workload (20k documents) showed:
    - `ob_strnncollsp_utf8mb4` returns equal immediately for identical byte
      sequences (very common when sorting index keys) and decodes plain ASCII
      pairs without the UTF-8 decoder; weight folding is unchanged.
+8. **Sort comparator and English tokenizer ASCII fast paths**:
+   - `ObSortOpImpl::Compare` looked up every sort field collation and compare
+     function through the `ObIArray::at()` virtual call per key comparison. The
+     hot comparison loops now fetch the backing arrays once and index them
+     directly; the sort result is unchanged (usable both by the index build and
+     by the relevance top-k of fulltext queries).
+   - The English analyzer tokenizer runs on plain ASCII for the benchmark's
+     English documents. `ObTextWhitespaceTokenizer` now classifies a single
+     ASCII byte as delimiter with one ctype table lookup instead of three
+     charset calls and gets its character length without charset dispatch;
+     `ObTokenStopWordNormalizer` uses the same combined ctype mask;
+     `ObBasicEnglishNormalizer` trims by direct ctype lookup and lower-cases
+     plain ASCII tokens byte-wise, skipping the charset conversion and its
+     allocation when the token is already lower case. Non-ASCII input keeps the
+     original charset paths.
 
 No tokenization rules, dictionary contents, match semantics or result formats
 are changed.

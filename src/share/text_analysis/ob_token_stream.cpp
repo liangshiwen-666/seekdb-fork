@@ -98,7 +98,7 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
     int64_t token_len = 0;
     // to next non-whitespace pos
     while (OB_SUCC(ret) && found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = get_next_char_len(doc, doc_len);
       trav_pos_ += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {// if char is invalid, just skip the rest of document
         iter_end_ = true;
@@ -112,7 +112,7 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
 
     // to next whitespace pos
     while (OB_SUCC(ret) && !found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = get_next_char_len(doc, doc_len);
       trav_pos_ += c_len;
       token_len += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {
@@ -138,7 +138,15 @@ bool ObTextWhitespaceTokenizer::found_delimiter()
 {
   bool found = false;
   const char *curr_char = input_doc_->ptr_ + trav_pos_;
-  found = ob_isspace(cs_, *curr_char) || ob_iscntrl(cs_, *curr_char) || ob_ispunct(cs_, *curr_char);
+  const unsigned char ch = static_cast<unsigned char>(*curr_char);
+  if (OB_LIKELY(ch < 0x80) && OB_LIKELY(1 == cs_->mbminlen)) {
+    // Single byte ASCII: whitespace, control and punctuation are three bit
+    // sets of the same ctype table entry, so one lookup replaces three.
+    const unsigned char ctype = nullptr != cs_->ctype ? (cs_->ctype + 1)[ch] : 0;
+    found = 0 != (ctype & (_MY_SPC | _MY_CTR | _MY_PNT));
+  } else {
+    found = ob_isspace(cs_, *curr_char) || ob_iscntrl(cs_, *curr_char) || ob_ispunct(cs_, *curr_char);
+  }
   return found;
 }
 
@@ -208,10 +216,20 @@ int ObTokenStopWordNormalizer::filter_special_marks(const ObDatum &check_token, 
   const int64_t token_len = check_token.len_;
   const char *token = check_token.ptr_;
   int64_t special_mark_cnt = 0;
-  for (int64_t i = 0; i < token_len; ++i) {
-    const char *character = token + i;
-    if (ob_ispunct(cs_, *character) || ob_iscntrl(cs_, *character)) {
-      special_mark_cnt++;
+  if (nullptr != cs_->ctype) {
+    // same byte-wise ctype table lookup as ob_ispunct()/ob_iscntrl(), but a
+    // single lookup and a single mask for both classes
+    const unsigned char *ctype = cs_->ctype + 1;
+    for (int64_t i = 0; i < token_len; ++i) {
+      if (0 != (ctype[static_cast<unsigned char>(token[i])] & (_MY_PNT | _MY_CTR))) {
+        special_mark_cnt++;
+      }
+    }
+  } else {
+    for (int64_t i = 0; i < token_len; ++i) {
+      if (ob_ispunct(cs_, token[i]) || ob_iscntrl(cs_, token[i])) {
+        special_mark_cnt++;
+      }
     }
   }
   is_valid = !(special_mark_cnt == token_len);
@@ -260,21 +278,42 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
         const uint32_t raw_token_len = tmp_datum.len_;
         uint32_t first_alnum_pos = 0;
         uint32_t last_alnum_pos = raw_token_len - 1;
-        for (uint32_t i = 0; i < raw_token_len; ++i) {
-          const char *character = token + i;
-          if (ob_isalnum(cs_, *character)) {
-            first_alnum_pos = i;
-            found_alnum = true;
-            break;
+        if (nullptr != cs_->ctype) {
+          // the ob_isalnum() macro is exactly this table lookup, do it directly
+          const unsigned char *ctype = cs_->ctype + 1;
+          for (uint32_t i = 0; i < raw_token_len; ++i) {
+            if (0 != (ctype[static_cast<unsigned char>(token[i])] & (_MY_U | _MY_L | _MY_NMR))) {
+              first_alnum_pos = i;
+              found_alnum = true;
+              break;
+            }
           }
-        }
+          for (int32_t i = raw_token_len - 1;
+               0 <= i && i < raw_token_len && i >= first_alnum_pos;
+               --i) {
+            if (0 != (ctype[static_cast<unsigned char>(token[i])] & (_MY_U | _MY_L | _MY_NMR))) {
+              last_alnum_pos = i;
+              found_alnum = true;
+              break;
+            }
+          }
+        } else {
+          for (uint32_t i = 0; i < raw_token_len; ++i) {
+            const char *character = token + i;
+            if (ob_isalnum(cs_, *character)) {
+              first_alnum_pos = i;
+              found_alnum = true;
+              break;
+            }
+          }
 
-        for (int32_t i = raw_token_len - 1; 0 <= i && i < raw_token_len && i >= first_alnum_pos; --i) {
-          const char *character = token + i;
-          if (ob_isalnum(cs_, *character)) {
-            last_alnum_pos = i;
-            found_alnum = true;
-            break;
+          for (int32_t i = raw_token_len - 1; 0 <= i && i < raw_token_len && i >= first_alnum_pos; --i) {
+            const char *character = token + i;
+            if (ob_isalnum(cs_, *character)) {
+              last_alnum_pos = i;
+              found_alnum = true;
+              break;
+            }
           }
         }
 
@@ -295,8 +334,35 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
     } else {
       ObString norm_alnum_token(norm_token_len, norm_token_ptr);
       ObString norm_lower_token;
-      if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
-      } else {
+      // Plain ASCII tokens are the common case of the English analyzer: case
+      // conversion is a byte mapping and does not need the charset machinery.
+      bool ascii_only = true;
+      bool need_lower = false;
+      for (uint32_t i = 0; i < norm_token_len; ++i) {
+        const unsigned char c = static_cast<unsigned char>(norm_token_ptr[i]);
+        if (c >= 0x80) {
+          ascii_only = false;
+          break;
+        } else if (c >= 'A' && c <= 'Z') {
+          need_lower = true;
+        }
+      }
+      if (ascii_only && !need_lower) {
+        norm_lower_token = norm_alnum_token;
+      } else if (ascii_only) {
+        char *buf = static_cast<char *>(norm_allocator_.alloc(norm_token_len));
+        if (OB_ISNULL(buf)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          for (uint32_t i = 0; i < norm_token_len; ++i) {
+            const char c = norm_token_ptr[i];
+            buf[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
+          }
+          norm_lower_token.assign_ptr(buf, norm_token_len);
+        }
+      } else if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+      }
+      if (OB_SUCC(ret)) {
         next_token.set_string(norm_lower_token);
       }
     }
