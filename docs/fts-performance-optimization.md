@@ -88,6 +88,21 @@ Local measurements on the benchmark workload (20k documents) showed:
      plain ASCII tokens byte-wise, skipping the charset conversion and its
      allocation when the token is already lower case. Non-ASCII input keeps the
      original charset paths.
+9. **Fewer index accesses on the count-only query path**:
+   - The inverted index scan of a count-only MATCH still fetched the document
+     length and token count columns (BM25 inputs) and kept the two document
+     count aggregations in its access list. None of them is observed, so they
+     are pruned from the scan access expressions (`extract_text_retrieval_access_expr`)
+     and the document length column is optional in the text retrieval code
+     generation for this case. `EXPLAIN` shows the plan is just
+     `SCALAR GROUP BY -> TEXT RETRIEVAL SCAN` with no document count
+     aggregation step. Boolean mode, score filtering and ranking paths keep the
+     original access list.
+   - The DAAT merge heap compared the inverted index domain ids (binary
+     `CS_TYPE_BINARY` values) with the generic collation compare function; byte
+     order is exactly the required order, so it compares raw bytes instead.
+   - `filter_on_demand` no longer constructs an `ObEvalCtx::BatchInfoScopeGuard`
+     per output row when the statement has no score filter.
 
 No tokenization rules, dictionary contents, match semantics or result formats
 are changed.
