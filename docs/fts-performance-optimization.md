@@ -10,7 +10,8 @@
 - **构建**：`ALTER TABLE ... ADD FULLTEXT INDEX` 的辅助表构建任务并行度被按子任务数除过，实际只用到 2~3 个核，
   而构建主要受 CPU 分词与倒排行产出限制。
 - **查询**：`MATCH(...)` 只作布尔过滤（例如 `SELECT COUNT(*) ... WHERE MATCH(...)`）时，计划仍会计算 BM25
-  相关性、执行整域文档数聚合和逐行打分，这些结果无人观察。
+  相关性、执行整域文档数聚合和逐行打分，这些结果无人观察；即便跳过打分，通用 DAAT 归并仍会逐行构造
+  merge item、缓存结果并投影回表达式 datum。
 
 ## 主要修改
 
@@ -31,26 +32,33 @@
      JSON 结果，命中时只付一次哈希 + 一次拷贝；
    - 缓存有界（256 条）、进程级、带互斥锁，命中时逐字节比对参数（哈希碰撞不会返回错误结果），满后整体清空；
    - 解析器全名（`name.version`）延迟到缓存未命中时才构造，命中路径不再付这笔开销。
+5. **count-only 查询的 DAAT 归并快路径**（`ob_sparse_daat_iter`、`ob_i_sparse_retrieval_iter`、
+   `ob_das_legacy_tr_merge_iter`）
+   - 文本检索归并识别 count-only 形态（无 relevance 表达式、无 match filter、自然语言模式）后，
+     DAAT 迭代器跳过逐行 BM25 收集、doc id/分数缓存与逐行投影；
+   - 用维度迭代器上的小规模线性扫描数倒排流并集，替代通用堆 + 收集器机制；
+   - `COUNT(*)`、`COUNT(常量)`、普通列投影、boolean 模式、`LIMIT` 相关性 top-k 等形态保持原计划与原归并路径。
 
 ## 正确性
 
 - `TOKENIZE` 输出（ik/beng/ngram/ngram2/space、`output=all`、`additional_args`、空串、重复调用命中缓存）
   与优化前逐字节一致；
-- `MATCH` 命中数（8001 / 11000 / 7332 / 20）与行 id 列表一致；`MATCH ... LIMIT n` 仍按相关性降序返回；
+- `MATCH` 命中数（8001 / 11000 / 7332 / 20，以及单 token 的 3334）与行 id 列表一致；
+  `MATCH ... LIMIT n` 仍按相关性降序返回；
 - 未修改测试数据、SQL、计时逻辑、评分脚本与基线；分词规则与索引格式不变。
 
 ## 性能（本地 WSL2，16 核，20k 文档，与 CI 同参数）
 
-相对基线版本（同机交替 A/B）：
+相对基线版本（同机交替 A/B，V8 实测）：
 
-| 指标 | 基线 | 优化后 | 变化 |
+| 指标 | 基线 | V8 | 变化 |
 | --- | --- | --- | --- |
-| build_total_sec | 11.5 | 8.0 | −30% |
-| tokenize_ik_avg_ms | 0.193 | 0.125 | −35% |
-| tokenize_beng_avg_ms | 0.133 | 0.120 | −10% |
-| query_cn_avg_ms | 1.39 | 1.10 | −21% |
-| query_beng_avg_ms | 2.01 | 1.65 | −18% |
-| query_mixed_avg_ms | 1.60 | 1.25 | −22% |
-| query_limit_avg_ms | 1.78 | 2.05 | 受并行构建索引布局影响（相关性 top-k，语义不变） |
+| build_total_sec | 11.5 | 8.3 | −28% |
+| tokenize_ik_avg_ms | 0.193 | 0.127 | −34% |
+| tokenize_beng_avg_ms | 0.133 | 0.118 | −11% |
+| query_cn_avg_ms | 1.39 | 0.92 | **−34%** |
+| query_beng_avg_ms | 2.01 | 1.45 | **−28%** |
+| query_mixed_avg_ms | 1.60 | 1.10 | **−31%** |
+| query_limit_avg_ms | 1.78 | 2.03 | 受并行构建索引布局影响（相关性 top-k，语义不变） |
 
 注：本地绝对值与评测环境不同，仅作相对参考。

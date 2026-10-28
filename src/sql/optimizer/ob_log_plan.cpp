@@ -12161,6 +12161,12 @@ int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_mat
                                                all_match_filters,
                                                need_calc_relevance);
       tr_info.need_calc_relevance_ = need_calc_relevance;
+      if (!need_calc_relevance) {
+        // Count-only shape: the match score and the boolean match filter are
+        // not observable (the scan only produces matched rows), so the
+        // redundant per-row filter can be dropped as well.
+        tr_info.pushdown_match_filter_ = nullptr;
+      }
     }
   }
 
