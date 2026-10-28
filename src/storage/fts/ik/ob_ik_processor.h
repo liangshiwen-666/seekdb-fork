@@ -73,12 +73,23 @@ public:
 
   int32_t handle_size() const { return handle_size_; }
 
+  // Returns the cached length and character type of the character that starts
+  // at the given byte offset. Every character of the text is decoded and
+  // classified once while segmenting, and the arbitrator needs the same
+  // information per position when it emits the result, so cache it to avoid
+  // decoding/classifying the text twice.
+  int char_info_at(int64_t offset,
+                   int64_t &char_len,
+                   ObFTCharUtil::CharType &type) const;
+
 private:
   int prepare_next_char();
 
   ObCollationType coll_type_;
   const char *fulltext_;
   int64_t fulltext_len_;
+  ObIAllocator &allocator_;
+  unsigned char *char_infos_; // 2 bytes per byte offset: [char_len, char_type]
 
   int64_t cursor_;
   int64_t next_char_len_;

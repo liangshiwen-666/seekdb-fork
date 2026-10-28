@@ -115,15 +115,9 @@ int ObIKArbitrator::output_result(TokenizeContext &ctx)
   ObIKTokenChain *chain = nullptr;
   for (int64_t current = 0; OB_SUCC(ret) && current < ctx.fulltext_len();) {
     ObFTCharUtil::CharType type;
-    // maybe not so good to keep single, check it later
-    if (OB_FAIL(ObCharset::first_valid_char(ctx.collation(),
-                                            ctx.fulltext() + current,
-                                            ctx.fulltext_len() - current,
-                                            char_len))) {
-    } else if (OB_FAIL(ObFTCharUtil::classify_first_char(ctx.collation(),
-                                                         ctx.fulltext() + current,
-                                                         char_len,
-                                                         type))) {
+    // The character length/type of every position was already computed while
+    // segmenting, reuse it instead of decoding and classifying the text again.
+    if (OB_FAIL(ctx.char_info_at(current, char_len, type))) {
     } else if (ObFTCharUtil::CharType::USELESS == type) {
       current += char_len; // skip useless char
     } else if (OB_FAIL(chains_.get_refactored(current, chain)) && OB_HASH_NOT_EXIST != ret) {

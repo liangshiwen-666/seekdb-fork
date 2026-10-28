@@ -51,7 +51,8 @@ TokenizeContext::TokenizeContext(ObCollationType coll_type,
                                  const char *fulltext,
                                  int64_t fulltext_len,
                                  bool is_smart)
-    : coll_type_(coll_type), fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
+    : coll_type_(coll_type), fulltext_(fulltext), fulltext_len_(fulltext_len),
+      allocator_(allocator), char_infos_(nullptr), cursor_(0),
       next_char_len_(0), handle_size_(0), is_smart_(is_smart), token_list_(allocator),
       result_list_(allocator)
 {
@@ -63,6 +64,10 @@ int TokenizeContext::init()
 
   if (OB_ISNULL(fulltext_) || fulltext_len_ <= 0) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (OB_ISNULL(char_infos_ = static_cast<unsigned char *>(
+                           allocator_.alloc(fulltext_len_ * 2)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else if (FALSE_IT(MEMSET(char_infos_, 0, fulltext_len_ * 2))) {
   } else if (OB_FAIL(prepare_next_char())) {
   }
   return ret;
@@ -110,6 +115,31 @@ int TokenizeContext::prepare_next_char()
                                                        fulltext_ + cursor_,
                                                        next_char_len_,
                                                        next_char_type_))) {
+  } else if (OB_NOT_NULL(char_infos_)) {
+    char_infos_[cursor_ * 2] = static_cast<unsigned char>(next_char_len_);
+    char_infos_[cursor_ * 2 + 1] = static_cast<unsigned char>(next_char_type_);
+  }
+  return ret;
+}
+
+int TokenizeContext::char_info_at(int64_t offset,
+                                  int64_t &char_len,
+                                  ObFTCharUtil::CharType &type) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(offset < 0 || offset >= fulltext_len_)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_NOT_NULL(char_infos_) && 0 != char_infos_[offset * 2]) {
+    char_len = char_infos_[offset * 2];
+    type = static_cast<ObFTCharUtil::CharType>(char_infos_[offset * 2 + 1]);
+  } else if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
+                                                 fulltext_ + offset,
+                                                 fulltext_len_ - offset,
+                                                 char_len))) {
+  } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
+                                                       fulltext_ + offset,
+                                                       char_len,
+                                                       type))) {
   }
   return ret;
 }
