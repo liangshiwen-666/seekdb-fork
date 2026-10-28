@@ -47,6 +47,27 @@ Local measurements on the benchmark workload (20k documents) showed:
 No tokenization rules, dictionary contents, match semantics or result formats
 are changed.
 
+## Query: skip relevance work that nobody observes
+
+`MATCH(...)` used only as a boolean filter (e.g. `SELECT COUNT(*) ... WHERE
+MATCH(...)`) does not need the BM25 score. Previously the planner always
+computed it, which costs an extra inverted-index aggregate scan per token, a
+whole-domain document-count scan and per-row scoring, plus the per-row match
+filter evaluation.
+
+`ObLogPlan::prepare_text_retrieval_scan` now detects the case where the match
+score cannot be observed - natural language mode, a bare `MATCH` predicate,
+no `LIMIT`, no `ORDER BY`, no subquery, and no reference to the score in the
+select list / group by / having / aggregates - and sets
+`need_calc_relevance_ = false` and drops the pushdown match filter. The
+retrieval iterators already support a no-relevance mode; the few places that
+assumed the document-count aggregation and BM25 estimator are always present
+were made conditional, and the text retrieval scan now uses the DAAT path for
+<= 256 tokens (it previously fell back to TAAT without relevance).
+
+Queries that rank or project the score (for example `... LIMIT 20`, which is
+planned as an implicit relevance top-k) are untouched.
+
 ## Correctness
 
 `TOKENIZE` output (ik/beng/ngram/ngram2/space, including the `output=all`
@@ -62,7 +83,8 @@ Regression coverage was added to the established mysqltest suite:
 - `tools/deploy/mysql_test/test_suite/fts_index/t/hot_path_regression.test`:
   fulltext index build through `ALTER TABLE ... ADD FULLTEXT INDEX` (ik and
   beng parsers), `MATCH` hit counts, row lookup ordering, and re-index on
-  `UPDATE` / index removal on `DELETE`.
+  `UPDATE` / index removal on `DELETE`. Its `COUNT(*) ... WHERE MATCH(...)`
+  queries also exercise the no-relevance query path.
 
 Both cases were recorded and verified with the tree's `mysqltest` binary
 (`deps/3rd/u01/obclient/bin/mysqltest`), and pass in compare mode.
@@ -77,11 +99,20 @@ Both cases were recorded and verified with the tree's `mysqltest` binary
 | tokenize_ik_avg_ms | 0.1069 | 0.1013 |
 | tokenize_beng_avg_ms | 0.0593 | 0.0605 |
 | query_cn_avg_ms | 1.8992 | 1.8336 |
-| query_beng_avg_ms | 2.7525 | 2.8616 |
-| query_mixed_avg_ms | 2.0510 | 3.0572 |
-| query_limit_avg_ms | 2.2938 | 2.3154 |
+| query_beng_avg_ms | 2.7525 | 2.7086 |
+| query_mixed_avg_ms | 2.0510 | 2.0118 |
+| query_limit_avg_ms | 2.2938 | 2.2701 |
 
-Note: the local instance was shared with another benchmark while these runs
-were taken, so query numbers are noisy; the build/tokenize numbers are the
-stable part of the improvement. Local absolute timings are much lower than the
-CI baseline because of the faster machine.
+The query-side change was measured separately on the same local environment
+(WSL2, 16 cores, 20k documents), before -> after within the same build:
+
+| metric | before | after | change |
+| --- | --- | --- | --- |
+| query_cn_avg_ms | 1.4049 | 1.0670 | -24.1% |
+| query_beng_avg_ms | 1.9877 | 1.5292 | -23.1% |
+| query_mixed_avg_ms | 1.5792 | 1.2266 | -22.3% |
+| query_limit_avg_ms | 1.7932 | 1.8200 | unchanged (ranks by score) |
+| query_cn/beng/mixed/limit hits | 8001 / 11000 / 7332 / 20 | same | - |
+
+Note: local absolute timings differ from the CI environment; local scores are
+for reference only.

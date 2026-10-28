@@ -11987,6 +11987,72 @@ int ObLogPlan::construct_startup_filter_for_limit(ObRawExpr *limit_expr, ObLogic
   return ret;
 }
 
+namespace {
+
+bool fts_expr_reference(ObRawExpr *root, ObRawExpr *target)
+{
+  bool found = false;
+  if (OB_NOT_NULL(root)) {
+    if (root == target) {
+      found = true;
+    } else {
+      for (int64_t i = 0; !found && i < root->get_param_count(); ++i) {
+        found = fts_expr_reference(root->get_param_expr(i), target);
+      }
+    }
+  }
+  return found;
+}
+
+// A WHERE MATCH(...) predicate is stored as a boolean wrapper around the match
+// expression (T_OP_BOOL), or as the match expression itself in some paths.
+bool fts_is_bare_match_predicate(ObRawExpr *pred, ObRawExpr *match_expr)
+{
+  bool bare = false;
+  if (OB_NOT_NULL(pred) && OB_NOT_NULL(match_expr)) {
+    if (pred == match_expr) {
+      bare = true;
+    } else if (T_OP_BOOL == pred->get_expr_type()
+               && 1 == pred->get_param_count()
+               && pred->get_param_expr(0) == match_expr) {
+      bare = true;
+    }
+  }
+  return bare;
+}
+
+// Returns true when the match score is only used as a boolean filter, i.e. the
+// plan cannot observe the score value: MATCH is a plain predicate without
+// ordering by relevance, without LIMIT (which may rank by relevance) and
+// without any subquery that could consume the value.
+bool fts_match_score_unused(const ObDMLStmt *stmt, ObRawExpr *match_expr)
+{
+  bool used = false;
+  if (OB_ISNULL(stmt) || OB_ISNULL(match_expr)) {
+    used = true;
+  } else if (stmt->has_limit() || stmt->has_order_by()
+             || 0 != stmt->get_subquery_exprs().count()) {
+    used = true;
+  } else if (stmt->is_select_stmt()) {
+    const ObSelectStmt *select_stmt = static_cast<const ObSelectStmt *>(stmt);
+    for (int64_t i = 0; !used && i < select_stmt->get_select_items().count(); ++i) {
+      used = fts_expr_reference(select_stmt->get_select_items().at(i).expr_, match_expr);
+    }
+    for (int64_t i = 0; !used && i < select_stmt->get_group_exprs().count(); ++i) {
+      used = fts_expr_reference(select_stmt->get_group_exprs().at(i), match_expr);
+    }
+    for (int64_t i = 0; !used && i < select_stmt->get_having_exprs().count(); ++i) {
+      used = fts_expr_reference(select_stmt->get_having_exprs().at(i), match_expr);
+    }
+    for (int64_t i = 0; !used && i < select_stmt->get_aggr_items().count(); ++i) {
+      used = fts_expr_reference(select_stmt->get_aggr_items().at(i), match_expr);
+    }
+  }
+  return !used;
+}
+
+} // namespace
+
 int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_match_exprs,
                                            const ObIArray<ObRawExpr *> &scan_match_filters,
                                            const ObIArray<ObRawExpr *> &all_match_filters,
@@ -12038,7 +12104,21 @@ int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_mat
   } else {
     ObTextRetrievalInfo &tr_info = table_scan->get_text_retrieval_info();
     tr_info.match_expr_ = match_against;
-    tr_info.pushdown_match_filter_ = match_pred;
+    if (fts_is_bare_match_predicate(match_pred, match_against)
+        && sql::ObMatchAgainstMode::NATURAL_LANGUAGE_MODE == match_against->get_mode_flag()
+        && !table_scan->is_vec_idx_scan()
+        && !table_scan->is_vec_adaptive_scan()
+        && !table_scan->is_vec_idx_scan_post_filter()
+        && !table_scan->has_func_lookup()
+        && fts_match_score_unused(get_stmt(), match_against)) {
+      // MATCH only takes part in the boolean filtering, the score is never
+      // observed by the plan: skip BM25 score computation and the extra
+      // document-count aggregations (they do not change the match rows).
+      tr_info.need_calc_relevance_ = false;
+      tr_info.pushdown_match_filter_ = nullptr;
+    } else {
+      tr_info.pushdown_match_filter_ = match_pred;
+    }
     // The mapping table is absent when the data-table rowkey is used as the document ID.
     table_scan->set_doc_id_index_table_id(tr_info.doc_id_idx_tid_);
     if (table_scan->is_vec_adaptive_scan() || table_scan->is_vec_idx_scan_post_filter()) {
