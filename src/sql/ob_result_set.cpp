@@ -27,6 +27,7 @@
 #include "sql/resolver/dml/ob_select_stmt.h"
 #include "sql/monitor/show_trace/ob_show_trace.h"
 #include "sql/engine/table/ob_table_scan_op.h"
+#include "sql/engine/aggregate/ob_scalar_aggregate_op.h"
 #include "share/ob_ddl_checksum.h"
 
 using namespace oceanbase::sql;
@@ -173,6 +174,14 @@ int ObResultSet::open()
   ObTraceSpanGuard open_span(&my_session_, TRACE_OPEN);
   if (OB_FAIL(execute())) {
   } else if (OB_FAIL(open_result())) {
+  }
+
+  if (OB_SUCC(ret)
+      && (ObStmt::is_dml_write_stmt(stmt_type_)
+          || ObStmt::is_ddl_stmt(stmt_type_, has_global_variable_))) {
+    // A statement that may modify data completed: cached query results must not
+    // be reused any more.
+    bump_query_result_cache_version();
   }
 
   if (OB_SUCC(ret)) {

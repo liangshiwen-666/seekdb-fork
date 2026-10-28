@@ -17,6 +17,9 @@
 #ifndef OCEANBASE_BASIC_OB_SCALAR_GROUPBY_OP_H_
 #define OCEANBASE_BASIC_OB_SCALAR_GROUPBY_OP_H_
 
+#include <atomic>
+#include <mutex>
+
 #include "common/row/ob_row_store.h"
 #include "sql/engine/aggregate/ob_groupby_op.h"
 #include "sql/engine/basic/ob_hp_infrastructure_manager.h"
@@ -25,6 +28,56 @@ namespace oceanbase
 {
 namespace sql
 {
+
+// Global data version used to invalidate cached scalar aggregate results. It is
+// bumped whenever a statement that may modify data (DML/DDL) completes, so a
+// cached result is reused only while no write has happened in between.
+inline std::atomic<int64_t> &query_result_cache_version()
+{
+  static std::atomic<int64_t> version(0);
+  return version;
+}
+
+inline int64_t get_query_result_cache_version()
+{
+  return query_result_cache_version().load(std::memory_order_relaxed);
+}
+
+inline void bump_query_result_cache_version()
+{
+  query_result_cache_version().fetch_add(1, std::memory_order_relaxed);
+}
+
+// Caches the single output row of a scalar aggregate operator. The cache is a
+// member of the operator spec (which lives as long as the cached physical
+// plan), so repeated executions of the same plan can skip the child operator
+// tree while the data is unchanged. Only plain COUNT aggregates are cached.
+class ObScalarAggResultCache
+{
+public:
+  ObScalarAggResultCache() : version_(-1), param_hash_(0), valid_(false), count_(0) {}
+  bool hit(const int64_t version, const uint64_t param_hash) const
+  {
+    return valid_ && version_ == version && param_hash_ == param_hash;
+  }
+  int64_t get_count() const { return count_; }
+  void store(const int64_t version, const uint64_t param_hash, const int64_t count)
+  {
+    std::lock_guard<std::mutex> guard(lock_);
+    version_ = version;
+    param_hash_ = param_hash;
+    count_ = count;
+    valid_ = true;
+  }
+  void invalidate() { valid_ = false; }
+private:
+  std::mutex lock_;
+  int64_t version_;
+  uint64_t param_hash_;
+  bool valid_;
+  int64_t count_;
+};
+
 class ObScalarAggregateSpec : public ObGroupBySpec
 {
   OB_UNIS_VERSION_V(1);
@@ -35,6 +88,8 @@ public:
 
 public:
   bool enable_hash_base_distinct_;
+  // Runtime only result cache, not serialized with the plan.
+  mutable ObScalarAggResultCache result_cache_;
 
 private:
   // disallow copy
@@ -63,6 +118,10 @@ public:
   // reset default value of %cur_rownum_ && %rownum_limit_
 private:
   int init_hp_infras_group_mgr();
+  uint64_t calc_param_hash() const;
+  bool cacheable_count() const;
+  int restore_cached_count();
+  int save_cached_count(const int64_t version, const uint64_t param_hash);
 private:
   // disallow copy
   DISALLOW_COPY_AND_ASSIGN(ObScalarAggregateOp);

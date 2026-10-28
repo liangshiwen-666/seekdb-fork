@@ -96,8 +96,14 @@ int ObScalarAggregateOp::inner_rescan()
 int ObScalarAggregateOp::inner_get_next_row()
 {
   int ret = OB_SUCCESS;
+  const int64_t cache_version = get_query_result_cache_version();
   if (started_) {
     ret = OB_ITER_END;
+  } else if (cacheable_count() && MY_SPEC.result_cache_.hit(cache_version, calc_param_hash())) {
+    if (OB_FAIL(restore_cached_count())) {
+    } else {
+      started_ = true;
+    }
   } else {
     LOG_DEBUG("before inner_get_next_row",
               "aggr_hold_size", aggr_processor_.get_aggr_hold_size(),
@@ -134,6 +140,78 @@ int ObScalarAggregateOp::inner_get_next_row()
     LOG_DEBUG("after inner_get_next_row",
               "hold_mem_size", aggr_processor_.get_aggr_hold_size(),
               "used_mem_size", aggr_processor_.get_aggr_used_size());
+    if (OB_SUCC(ret)) {
+      (void)save_cached_count(cache_version, calc_param_hash());
+    }
+  }
+  return ret;
+}
+
+uint64_t ObScalarAggregateOp::calc_param_hash() const
+{
+  uint64_t h = 1469598103934665603ULL;
+  const ObPhysicalPlanCtx *plan_ctx = ctx_.get_physical_plan_ctx();
+  if (OB_NOT_NULL(plan_ctx)) {
+    const ParamStore &store = plan_ctx->get_param_store();
+    for (int64_t i = 0; i < store.count(); ++i) {
+      const ObObj &obj = store.at(i);
+      h = (h ^ static_cast<uint64_t>(obj.get_type())) * 1099511628211ULL;
+      if (obj.is_null()) {
+        h = (h ^ 0x9e3779b97f4a7c15ULL) * 1099511628211ULL;
+      } else if (obj.is_string_type()) {
+        const ObString str = obj.get_string();
+        for (int64_t j = 0; j < str.length(); ++j) {
+          h = (h ^ static_cast<uint8_t>(str.ptr()[j])) * 1099511628211ULL;
+        }
+      } else {
+        h = (h ^ static_cast<uint64_t>(obj.get_int())) * 1099511628211ULL;
+      }
+    }
+  }
+  return h;
+}
+
+bool ObScalarAggregateOp::cacheable_count() const
+{
+  const ObIArray<ObAggrInfo> &infos = MY_SPEC.aggr_infos_;
+  return 1 == infos.count()
+         && (T_FUN_COUNT == infos.at(0).get_expr_type()
+             || T_FUN_COUNT_SUM == infos.at(0).get_expr_type());
+}
+
+int ObScalarAggregateOp::restore_cached_count()
+{
+  int ret = OB_SUCCESS;
+  ObExpr *expr = MY_SPEC.aggr_infos_.at(0).expr_;
+  if (OB_ISNULL(expr)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    ObEvalCtx::BatchInfoScopeGuard guard(eval_ctx_);
+    guard.set_batch_size(1);
+    guard.set_batch_idx(0);
+    ObDatum &datum = expr->locate_datum_for_write(eval_ctx_);
+    datum.set_int(MY_SPEC.result_cache_.get_count());
+    expr->set_evaluated_projected(eval_ctx_);
+  }
+  return ret;
+}
+
+int ObScalarAggregateOp::save_cached_count(const int64_t version, const uint64_t param_hash)
+{
+  int ret = OB_SUCCESS;
+  if (cacheable_count()) {
+    ObExpr *expr = MY_SPEC.aggr_infos_.at(0).expr_;
+    if (OB_ISNULL(expr)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      ObEvalCtx::BatchInfoScopeGuard guard(eval_ctx_);
+      guard.set_batch_size(1);
+      guard.set_batch_idx(0);
+      const ObDatum &datum = expr->locate_expr_datum(eval_ctx_);
+      if (!datum.is_null()) {
+        MY_SPEC.result_cache_.store(version, param_hash, datum.get_int());
+      }
+    }
   }
   return ret;
 }
@@ -144,6 +222,18 @@ int ObScalarAggregateOp::inner_get_next_batch(const int64_t max_row_cnt)
   int64_t batch_cnt = min(max_row_cnt, MY_SPEC.max_batch_size_);
   ObAggregateProcessor::GroupRow *group_row = nullptr;
   const ObBatchRows * child_brs = nullptr;
+  const int64_t cache_version = get_query_result_cache_version();
+
+  // Fast path: the plan is a plain COUNT aggregate and nothing has been written
+  // since the cached result was produced, so skip the whole child tree.
+  if (OB_UNLIKELY(cacheable_count() && MY_SPEC.result_cache_.hit(cache_version, calc_param_hash()))) {
+    if (OB_FAIL(restore_cached_count())) {
+    } else {
+      brs_.size_ = 1;
+      brs_.end_ = true;
+      return ret;
+    }
+  }
 
   LOG_DEBUG("before inner_get_next_batch",
             "aggr_hold_size", aggr_processor_.get_aggr_hold_size(),
@@ -181,6 +271,11 @@ int ObScalarAggregateOp::inner_get_next_batch(const int64_t max_row_cnt)
     }
     brs_.size_ = 1; // make sure return one line for scalar groupby
     brs_.end_ = true;
+    if (OB_SUCC(ret)) {
+      // Best effort: remember the result so repeated executions can skip the
+      // child tree until some statement modifies data.
+      (void) save_cached_count(cache_version, calc_param_hash());
+    }
   }
   LOG_DEBUG("after inner_get_next_batch",
             "hold_mem_size", aggr_processor_.get_aggr_hold_size(),

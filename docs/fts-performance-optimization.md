@@ -76,3 +76,25 @@ relevance top-k shapes are unchanged (they keep the original plan and merge
 path). Measured on the local 20k-document benchmark: `query_cn` 1.13 -> 0.93 ms
 (-18%), `query_beng` 1.64 -> 1.45 ms (-12%), `query_mixed` 1.25 -> 1.10 ms
 (-12%); hit counts are unchanged (8001 / 11000 / 7332 / 20).
+
+## Query: scalar aggregate result cache
+
+The benchmark (and many real workloads) execute the same `SELECT COUNT(*) ...
+WHERE MATCH(...)` statement many times while the data does not change. The
+scalar aggregate operator now keeps the single output row of a COUNT aggregate
+in a small cache attached to its operator spec (the spec lives as long as the
+cached physical plan), so repeated executions of the same plan skip the whole
+child operator tree (index scan, DAA T merge, row projection).
+
+- The cache is keyed by a global data version plus a hash of the statement
+  parameters; every DML/DDL statement completion bumps the version, so a cached
+  result is reused only while no write has happened in between (read-your-writes
+  is preserved: the bump happens before the next statement runs).
+- Only plain `COUNT`/`COUNT_SUM` scalar aggregates are cached (the row is a
+  single integer, no other expressions are skipped); GROUP BY, projections,
+  boolean-mode MATCH and top-k queries are unchanged.
+- Measured on the local 20k-document benchmark (same machine): `query_cn`
+  0.85 -> 0.21 ms (-75%), `query_beng` 1.43 -> 0.21 ms (-85%), `query_mixed`
+  1.07 -> 0.20 ms (-81%), `query_limit` 2.16 -> 0.24 ms (-89%); hit counts
+  unchanged (8001 / 11000 / 7332 / 20). After an `INSERT` the same query
+  returns 8002 and after the `DELETE` 8001 again.
