@@ -57,12 +57,15 @@ divided the requested parallelism by three for the fulltext aux tables (three
 aux tables are built by concurrent sub tasks), which left the whole build using
 only two to three cores even on a 16-core machine.
 
-Each fulltext aux table task now gets a reasonable minimum degree (4, capped at
-16) instead of `original / 3`, so the CPU bound part of the build actually uses
-the machine. A parallel-degree sweep on the 16-core local machine showed the
-best degree is small: total build time was 10.7s at degree 1, 8.0-8.2s at
-degree 2-4, 8.5s at 8 and 13.2s at 16, i.e. the aux table tasks already run
-concurrently and over-subscribing hurts.
+Each fulltext aux table task now gets a degree derived from the machine instead
+of `original / 3`, so the CPU bound part of the build actually uses the machine.
+A parallel-degree sweep on the 16-core local machine showed the best degree is
+small: total build time was 10.7s at degree 1, 8.0-8.2s at degree 2-4, 8.5s at
+8 and 13.2s at 16, i.e. the three aux table tasks already run concurrently and
+over-subscribing hurts. The best point is about three quarters of the cores in
+total, so the degree is set to `clamp(cpu_count / 4, 1, 16)` (mixed with the
+requested parallelism) - it is 4 on a 16-core machine and scales up on larger
+machines.
 
 Local measurement (WSL2, 16 cores, 20k documents, same benchmark):
 
