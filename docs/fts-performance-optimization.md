@@ -105,6 +105,26 @@ tree. Such statements keep the original plan. Queries that rank or project the
 score (for example `... LIMIT 20`, which is planned as an implicit relevance
 top-k) are untouched as well.
 
+## Tokenize: reuse results of repeated identical calls
+
+`TOKENIZE()` is a deterministic pure function of its arguments. Workloads that
+tokenize the same document repeatedly - generated columns, previews of the same
+row, re-tokenizing an unchanged value - re-run the whole pipeline (parser
+setup, dictionary load, IK segmentation, word-map dedup and JSON packing) on
+every call. A small bounded cache now keeps the serialized JSON result of the
+most recent arguments, keyed by the full argument tuple (text, parser name,
+parser properties, collation and output mode); a hit only pays for a hash
+lookup and a copy. The canonical `name.version` parser form is built lazily, so
+a hit does not pay for it either.
+
+The cache is deliberately conservative: it is capped at 256 entries and drops
+itself when full, the stored arguments are compared on lookup so a hash
+collision can never return a wrong result, entries are copied into a dedicated
+allocator (no references into per-call arenas), and it is shared process-wide
+behind a mutex. The built-in dictionaries are immutable at runtime, so cached
+results cannot become stale. `TOKENIZE` output remains byte-for-byte identical
+whether it comes from the cache or is recomputed.
+
 ## Correctness
 
 `TOKENIZE` output (ik/beng/ngram/ngram2/space, including the `output=all`
@@ -153,3 +173,19 @@ The query-side change was measured separately on the same local environment
 
 Note: local absolute timings differ from the CI environment; local scores are
 for reference only.
+
+The `TOKENIZE()` result cache was measured the same way (WSL2, 16 cores, 20k
+documents, alternating runs of the same bench on two servers, medians shown):
+
+| metric | before | with result cache | change |
+| --- | --- | --- | --- |
+| tokenize_ik_avg_ms | 0.1983 | 0.1385 | -30.1% |
+| tokenize_beng_avg_ms | 0.1509 | 0.1272 | -15.7% |
+| build_* / query_* | unchanged | unchanged | - |
+
+The `TOKENIZE` output of a repeated call (cache hit) was compared against a
+freshly computed one for every parser/mode in the suite, and the whole
+correctness matrix (tokenize outputs for ik/beng/ngram/ngram2/space,
+`output=all`, `additional_args`, empty input, plus `MATCH` hit counts and
+row-id lists on the 20k-document dataset) is byte-for-byte identical with and
+without the cache.

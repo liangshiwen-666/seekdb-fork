@@ -69,6 +69,10 @@ private:
   public:
     // for property and tmp json string
     mutable ObArenaAllocator allocator_;
+    // Raw parser name as given by the caller (for example "ik"). The canonical
+    // "name.version" form in parser_name_ is built lazily, only when the
+    // tokenize result cache misses.
+    ObString raw_parser_name_;
     ObString parser_name_;
     ObString properties_;
     // already parsed/validated parser property, avoids a json round trip
@@ -83,10 +87,13 @@ private:
   };
 
 private:
-  static int parse_param(const ObExpr &expr,
-                         ObEvalCtx &ctx,
-                         common::ObArenaAllocator &allocator,
-                         TokenizeParam &param);
+  static int parse_param_prefix(const ObExpr &expr,
+                                ObEvalCtx &ctx,
+                                common::ObArenaAllocator &allocator,
+                                TokenizeParam &param);
+
+  // Hash of the tokenize arguments used as the key of the result cache.
+  static uint64_t tokenize_cache_hash(const TokenizeParam &param);
 
   static int parse_fulltext(const ObExpr &expr, ObEvalCtx &ctx, TokenizeParam &param);
   static int parse_parser_name(const ObExpr &expr, ObEvalCtx &ctx, TokenizeParam &param);
