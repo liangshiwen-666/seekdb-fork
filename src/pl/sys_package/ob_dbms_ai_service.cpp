@@ -23,6 +23,8 @@
 #include "share/ai_service/ob_ai_service_struct.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
 #include "share/ob_rpc_struct.h"
+#include "lib/time/ob_time_utility.h"
+#include "lib/worker.h"
 #include "src/pl/ob_pl.h"
 #include "sql/privilege_check/ob_ai_model_priv_util.h"
 
@@ -32,6 +34,12 @@ namespace oceanbase
 {
 namespace pl
 {
+
+// Root Service commands issued from SQL are serialised by a process-wide mutex.
+// Waiting behind a busy in-process DDL queue must not be reported as the
+// caller's (usually 10s) query timeout, so AI model DDL extends the worker
+// deadline for the command, mirroring the table/index DDL executors.
+static constexpr int64_t OB_AI_MODEL_DDL_TIMEOUT_US = 60LL * 1000 * 1000;
 
 int ObDBMSAiService::check_ai_model_privilege_(ObPLExecCtx &ctx, ObPrivSet required_priv)
 {
@@ -276,8 +284,11 @@ int ObDBMSAiService::create_ai_model(ObPLExecCtx &ctx, sql::ParamStore &params, 
       if (OB_FAIL(arg.check_valid())) {
       } else if (OB_ISNULL(root_commands)) {
         ret = OB_NOT_INIT;
-      } else if (OB_FAIL(query::serialize_root_service_call(
-                           [&]{ return root_commands->create_ai_model(arg); }))) {
+      } else {
+        THIS_WORKER.set_timeout_ts(ObTimeUtility::current_time() + OB_AI_MODEL_DDL_TIMEOUT_US);
+        if (OB_FAIL(query::serialize_root_service_call(
+                         [&]{ return root_commands->create_ai_model(arg); }))) {
+        }
       }
     }
 
@@ -325,9 +336,12 @@ int ObDBMSAiService::drop_ai_model(ObPLExecCtx &ctx, sql::ParamStore &params, co
     arg.ddl_stmt_str_ = ctx.exec_ctx_->get_sql_ctx()->cur_sql_;
       if (OB_ISNULL(root_commands)) {
         ret = OB_NOT_INIT;
-      } else if (OB_FAIL(query::serialize_root_service_call(
-                           [&]{ return root_commands->drop_ai_model(arg); }))) {
-    }
+      } else {
+        THIS_WORKER.set_timeout_ts(ObTimeUtility::current_time() + OB_AI_MODEL_DDL_TIMEOUT_US);
+        if (OB_FAIL(query::serialize_root_service_call(
+                         [&]{ return root_commands->drop_ai_model(arg); }))) {
+        }
+      }
 
     LOG_INFO("finished to drop ai model", K(ret), K(params), K(model_name));
   }
