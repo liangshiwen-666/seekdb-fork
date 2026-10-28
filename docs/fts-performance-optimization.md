@@ -49,6 +49,30 @@ Local measurements on the benchmark workload (20k documents) showed:
 No tokenization rules, dictionary contents, match semantics or result formats
 are changed.
 
+## Index build: use the available cores
+
+The fulltext index build is dominated by tokenization, which is CPU bound and
+scales with the degree of parallelism. `ObFtsIndexBuilderUtil::decide_parallelism`
+divided the requested parallelism by three for the fulltext aux tables (three
+aux tables are built by concurrent sub tasks), which left the whole build using
+only two to three cores even on a 16-core machine.
+
+Each fulltext aux table task now gets a reasonable minimum degree (8, capped at
+16) instead of `original / 3`, so the CPU bound part of the build actually uses
+the machine.
+
+Local measurement (WSL2, 16 cores, 20k documents, same benchmark):
+
+| metric | before | after | change |
+| --- | --- | --- | --- |
+| build_ik_all_sec | 4.90 | 3.85 | -21% |
+| build_ik_content_sec | 3.55 | 2.75 | -23% |
+| build_beng_en_sec | 2.05 | 1.79 | -13% |
+| build_total_sec | 10.62 | 8.47 | -20% |
+
+The index contents are unchanged (same rows), and the `fts_index` mysqltest
+case that builds ik and beng indexes through `ALTER TABLE` passes.
+
 ## Query: skip relevance work that nobody observes
 
 `MATCH(...)` used only as a boolean filter (e.g. `SELECT COUNT(*) ... WHERE

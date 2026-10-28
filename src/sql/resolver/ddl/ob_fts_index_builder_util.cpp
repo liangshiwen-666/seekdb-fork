@@ -1047,7 +1047,13 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
       case share::schema::ObIndexType::INDEX_TYPE_DOC_ID_ROWKEY_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
-        decided_parallelism = MAX(original_parallelism / 3, 1L);
+        // Fulltext index build is dominated by tokenization, which is CPU
+        // bound and scales with the degree of parallelism. The three aux
+        // tables are built by concurrent sub tasks, so previously the degree
+        // was divided by three to cover all sub tasks with the original
+        // parallelism. Allowing each sub task to run with a reasonable
+        // minimum degree makes the whole build use the available cores.
+        decided_parallelism = MIN(MAX(original_parallelism, 8L), 16L);
         break;
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:
