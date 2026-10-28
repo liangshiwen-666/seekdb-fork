@@ -1051,9 +1051,10 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
         // bound and scales with the degree of parallelism. The three aux
         // tables are built by concurrent sub tasks, so previously the degree
         // was divided by three to cover all sub tasks with the original
-        // parallelism. Allowing each sub task to run with a reasonable
-        // minimum degree makes the whole build use the available cores.
-        decided_parallelism = MIN(MAX(original_parallelism, 8L), 16L);
+        // parallelism. A small minimum degree (4) gives the best aggregate
+        // build time: the aux table tasks already run concurrently, and
+        // higher degrees over-subscribe and slow the whole build down.
+        decided_parallelism = MIN(MAX(original_parallelism, 4L), 16L);
         break;
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:

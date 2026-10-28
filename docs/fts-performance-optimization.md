@@ -57,18 +57,21 @@ divided the requested parallelism by three for the fulltext aux tables (three
 aux tables are built by concurrent sub tasks), which left the whole build using
 only two to three cores even on a 16-core machine.
 
-Each fulltext aux table task now gets a reasonable minimum degree (8, capped at
+Each fulltext aux table task now gets a reasonable minimum degree (4, capped at
 16) instead of `original / 3`, so the CPU bound part of the build actually uses
-the machine.
+the machine. A parallel-degree sweep on the 16-core local machine showed the
+best degree is small: total build time was 10.7s at degree 1, 8.0-8.2s at
+degree 2-4, 8.5s at 8 and 13.2s at 16, i.e. the aux table tasks already run
+concurrently and over-subscribing hurts.
 
 Local measurement (WSL2, 16 cores, 20k documents, same benchmark):
 
 | metric | before | after | change |
 | --- | --- | --- | --- |
-| build_ik_all_sec | 4.90 | 3.85 | -21% |
+| build_ik_all_sec | 4.90 | 3.72 | -24% |
 | build_ik_content_sec | 3.55 | 2.75 | -23% |
-| build_beng_en_sec | 2.05 | 1.79 | -13% |
-| build_total_sec | 10.62 | 8.47 | -20% |
+| build_beng_en_sec | 2.05 | 1.74 | -15% |
+| build_total_sec | 10.62 | 8.20 | -23% |
 
 The index contents are unchanged (same rows), and the `fts_index` mysqltest
 case that builds ik and beng indexes through `ALTER TABLE` passes.
