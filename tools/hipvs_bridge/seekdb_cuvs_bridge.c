@@ -35,7 +35,16 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
   h->ip->intermediate_graph_degree = 256;
-  h->ip->nn_descent_niter = 100;
+  /* NN-Descent refinement iterations are the dominant build cost. Higher
+   * dimensional data needs more refinement to reach the recall plateau, while
+   * 128d data converges much earlier; scale the iteration budget with the
+   * dimension instead of always paying the 100-iteration worst case. */
+  {
+    long niter = 32 + (dim - 128) * 40 / 128;
+    if (niter < 32) niter = 32;
+    if (niter > 100) niter = 100;
+    h->ip->nn_descent_niter = (size_t)niter;
+  }
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
