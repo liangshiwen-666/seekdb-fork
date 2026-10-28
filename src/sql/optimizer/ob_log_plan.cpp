@@ -11989,21 +11989,6 @@ int ObLogPlan::construct_startup_filter_for_limit(ObRawExpr *limit_expr, ObLogic
 
 namespace {
 
-bool fts_expr_reference(ObRawExpr *root, ObRawExpr *target)
-{
-  bool found = false;
-  if (OB_NOT_NULL(root)) {
-    if (root == target) {
-      found = true;
-    } else {
-      for (int64_t i = 0; !found && i < root->get_param_count(); ++i) {
-        found = fts_expr_reference(root->get_param_expr(i), target);
-      }
-    }
-  }
-  return found;
-}
-
 // A WHERE MATCH(...) predicate is stored as a boolean wrapper around the match
 // expression (T_OP_BOOL), or as the match expression itself in some paths.
 bool fts_is_bare_match_predicate(ObRawExpr *pred, ObRawExpr *match_expr)
@@ -12021,34 +12006,46 @@ bool fts_is_bare_match_predicate(ObRawExpr *pred, ObRawExpr *match_expr)
   return bare;
 }
 
-// Returns true when the match score is only used as a boolean filter, i.e. the
-// plan cannot observe the score value: MATCH is a plain predicate without
-// ordering by relevance, without LIMIT (which may rank by relevance) and
-// without any subquery that could consume the value.
-bool fts_match_score_unused(const ObDMLStmt *stmt, ObRawExpr *match_expr)
+// Returns true when the statement only counts the rows matched by the given
+// match predicate: every select item is COUNT(*) / COUNT(const) and MATCH is
+// the only condition of the statement (no ordering, limit, grouping, distinct,
+// window function or subquery).
+// In this shape neither the match score nor any data-table column is needed by
+// the plan, so the text retrieval scan runs without index back and the BM25
+// score computation (plus its extra document-count aggregations) can be
+// skipped. The match filter is only a boolean filter here, dropping it does not
+// change the rows.
+bool fts_stmt_only_counts_match_rows(const ObDMLStmt *stmt, ObRawExpr *match_pred)
 {
-  bool used = false;
-  if (OB_ISNULL(stmt) || OB_ISNULL(match_expr)) {
-    used = true;
-  } else if (stmt->has_limit() || stmt->has_order_by()
-             || 0 != stmt->get_subquery_exprs().count()) {
-    used = true;
-  } else if (stmt->is_select_stmt()) {
+  bool counts_only = false;
+  if (OB_NOT_NULL(stmt) && OB_NOT_NULL(match_pred) && stmt->is_select_stmt()
+      && !stmt->has_limit() && !stmt->has_order_by()
+      && 0 == stmt->get_subquery_exprs().count()
+      && 1 == stmt->get_condition_exprs().count()
+      && stmt->get_condition_exprs().at(0) == match_pred) {
     const ObSelectStmt *select_stmt = static_cast<const ObSelectStmt *>(stmt);
-    for (int64_t i = 0; !used && i < select_stmt->get_select_items().count(); ++i) {
-      used = fts_expr_reference(select_stmt->get_select_items().at(i).expr_, match_expr);
-    }
-    for (int64_t i = 0; !used && i < select_stmt->get_group_exprs().count(); ++i) {
-      used = fts_expr_reference(select_stmt->get_group_exprs().at(i), match_expr);
-    }
-    for (int64_t i = 0; !used && i < select_stmt->get_having_exprs().count(); ++i) {
-      used = fts_expr_reference(select_stmt->get_having_exprs().at(i), match_expr);
-    }
-    for (int64_t i = 0; !used && i < select_stmt->get_aggr_items().count(); ++i) {
-      used = fts_expr_reference(select_stmt->get_aggr_items().at(i), match_expr);
+    // An implicit single-row aggregation (has_group_by() is true, but there is
+    // no group expression) is the normal shape of "SELECT COUNT(*) ... WHERE
+    // MATCH(...)", it does not touch data-table columns either.
+    if (0 == select_stmt->get_group_expr_size() && !select_stmt->has_distinct()
+        && !select_stmt->has_window_function()
+        && 0 == select_stmt->get_having_expr_size()
+        && select_stmt->get_select_item_size() > 0) {
+      counts_only = true;
+      for (int64_t i = 0; counts_only && i < select_stmt->get_select_item_size(); ++i) {
+        ObRawExpr *select_expr = select_stmt->get_select_item(i).expr_;
+        if (OB_ISNULL(select_expr) || T_FUN_COUNT != select_expr->get_expr_type()
+            || select_expr->get_param_count() > 1) {
+          counts_only = false;
+        } else if (1 == select_expr->get_param_count()
+                   && (OB_ISNULL(select_expr->get_param_expr(0))
+                       || !select_expr->get_param_expr(0)->is_const_expr())) {
+          counts_only = false;
+        }
+      }
     }
   }
-  return !used;
+  return counts_only;
 }
 
 } // namespace
@@ -12110,10 +12107,11 @@ int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_mat
         && !table_scan->is_vec_adaptive_scan()
         && !table_scan->is_vec_idx_scan_post_filter()
         && !table_scan->has_func_lookup()
-        && fts_match_score_unused(get_stmt(), match_against)) {
-      // MATCH only takes part in the boolean filtering, the score is never
-      // observed by the plan: skip BM25 score computation and the extra
-      // document-count aggregations (they do not change the match rows).
+        && fts_stmt_only_counts_match_rows(get_stmt(), match_pred)) {
+      // MATCH only takes part in the boolean filtering of a pure count query,
+      // the score is never observed by the plan: skip BM25 score computation
+      // and the extra document-count aggregations (they do not change the
+      // match rows).
       tr_info.need_calc_relevance_ = false;
       tr_info.pushdown_match_filter_ = nullptr;
     } else {

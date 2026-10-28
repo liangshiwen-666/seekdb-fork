@@ -84,18 +84,26 @@ computed it, which costs an extra inverted-index aggregate scan per token, a
 whole-domain document-count scan and per-row scoring, plus the per-row match
 filter evaluation.
 
-`ObLogPlan::prepare_text_retrieval_scan` now detects the case where the match
-score cannot be observed - natural language mode, a bare `MATCH` predicate,
-no `LIMIT`, no `ORDER BY`, no subquery, and no reference to the score in the
-select list / group by / having / aggregates - and sets
-`need_calc_relevance_ = false` and drops the pushdown match filter. The
-retrieval iterators already support a no-relevance mode; the few places that
-assumed the document-count aggregation and BM25 estimator are always present
-were made conditional, and the text retrieval scan now uses the DAAT path for
-<= 256 tokens (it previously fell back to TAAT without relevance).
+`ObLogPlan::prepare_text_retrieval_scan` now detects the pure counting shape -
+natural language mode, a bare `MATCH` predicate, `MATCH` being the only
+condition of the statement, no `LIMIT` / `ORDER BY` / subquery / grouping /
+distinct / window function, and every select item being `COUNT(*)` or
+`COUNT(const)` - and sets `need_calc_relevance_ = false` and drops the
+pushdown match filter. In this shape the text retrieval scan needs neither the
+score nor any data-table column (no index back), so the whole scan only
+produces the matched rows. The retrieval iterators already support a
+no-relevance mode; the few places that assumed the document-count aggregation
+and BM25 estimator are always present were made conditional, and the text
+retrieval scan now uses the DAAT path for <= 256 tokens (it previously fell
+back to TAAT without relevance).
 
-Queries that rank or project the score (for example `... LIMIT 20`, which is
-planned as an implicit relevance top-k) are untouched.
+The restriction to the pure counting shape is deliberate: when the statement
+projects data-table columns (`COUNT(col)`, `SUM(col)`, a subquery selecting
+columns, ...) the plan needs an index-back lookup, and skipping the relevance
+ctdefs there is not supported by the current text-retrieval/lookup iterator
+tree. Such statements keep the original plan. Queries that rank or project the
+score (for example `... LIMIT 20`, which is planned as an implicit relevance
+top-k) are untouched as well.
 
 ## Correctness
 
