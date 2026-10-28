@@ -26,6 +26,7 @@ namespace storage
 ObSRMergeCmp::ObSRMergeCmp()
   : cmp_func_(nullptr),
     iter_ids_(nullptr),
+    use_binary_memcmp_(false),
     is_inited_(false)
 {
 }
@@ -41,6 +42,9 @@ int ObSRMergeCmp::init(
     iter_ids_ = iter_ids;
     common::ObDatumBasicFuncs *basic_funcs = ObDatumFuncs::get_basic_func(id_meta.type_, id_meta.cs_type_);
     cmp_func_ = basic_funcs->null_first_cmp_;
+    // binary strings compare as raw bytes with the shorter one first, which the
+    // inline path below can do without the collation function
+    use_binary_memcmp_ = (CS_TYPE_BINARY == id_meta.cs_type_);
     if (OB_ISNULL(cmp_func_)) {
       ret = OB_ERR_UNEXPECTED;
     } else {
@@ -58,6 +62,12 @@ int ObSRMergeCmp::cmp(
   int ret = OB_SUCCESS;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
+  } else if (use_binary_memcmp_) {
+    const ObDatum &l_datum = get_id_datum(l.iter_idx_);
+    const ObDatum &r_datum = get_id_datum(r.iter_idx_);
+    const int64_t min_len = MIN(l_datum.len_, r_datum.len_);
+    const int mem_cmp = 0 == min_len ? 0 : MEMCMP(l_datum.ptr_, r_datum.ptr_, min_len);
+    cmp_ret = 0 != mem_cmp ? mem_cmp : (l_datum.len_ - r_datum.len_);
   } else {
     int tmp_ret = 0;
     if (OB_FAIL(cmp_func_(
@@ -364,36 +374,39 @@ int ObSRDaaTIterImpl::process_collected_row(const ObDatum &id_datum, const doubl
 int ObSRDaaTIterImpl::filter_on_demand(const int64_t count, const double relevance, bool &need_project)
 {
   int ret = OB_SUCCESS;
-  ObExpr *filter_expr = iter_param_->filter_expr_;
-  ObExpr *relevance_proj_expr = iter_param_->relevance_proj_expr_;
-  ObEvalCtx *eval_ctx = iter_param_->eval_ctx_;
-  ObEvalCtx::BatchInfoScopeGuard guard(*eval_ctx);
-
   if (!iter_param_->need_filter()) {
+    // The batch scope guard and the relevance projection are only needed when
+    // there really is a score filter to evaluate.
     need_project = true;
-  } else if (eval_ctx->is_vectorized()) {
-    if (OB_UNLIKELY(count >= eval_ctx->max_batch_size_)) {
+  } else {
+    ObExpr *filter_expr = iter_param_->filter_expr_;
+    ObExpr *relevance_proj_expr = iter_param_->relevance_proj_expr_;
+    ObEvalCtx *eval_ctx = iter_param_->eval_ctx_;
+    ObEvalCtx::BatchInfoScopeGuard guard(*eval_ctx);
+    if (eval_ctx->is_vectorized()) {
+      if (OB_UNLIKELY(count >= eval_ctx->max_batch_size_)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        guard.set_batch_idx(count);
+        ObDatum &relevance_proj_datum = relevance_proj_expr->locate_datum_for_write(*eval_ctx);
+        relevance_proj_datum.set_double(relevance);
+        relevance_proj_expr->get_evaluated_flags(*eval_ctx).set(count);
+        relevance_proj_expr->set_evaluated_projected(*eval_ctx);
+        ObDatum *filter_res = nullptr;
+        filter_expr->clear_evaluated_flag(*eval_ctx);
+        if (OB_FAIL(filter_expr->eval(*eval_ctx, filter_res))) {
+        } else {
+          need_project = !(filter_res->is_null() || 0 == filter_res->get_int());
+        }
+      }
+    } else if (OB_UNLIKELY(0 != count)) {
       ret = OB_ERR_UNEXPECTED;
     } else {
-      guard.set_batch_idx(count);
+      guard.set_batch_idx(0);
       ObDatum &relevance_proj_datum = relevance_proj_expr->locate_datum_for_write(*eval_ctx);
       relevance_proj_datum.set_double(relevance);
-      relevance_proj_expr->get_evaluated_flags(*eval_ctx).set(count);
       relevance_proj_expr->set_evaluated_projected(*eval_ctx);
-      ObDatum *filter_res = nullptr;
-      filter_expr->clear_evaluated_flag(*eval_ctx);
-      if (OB_FAIL(filter_expr->eval(*eval_ctx, filter_res))) {
-      } else {
-        need_project = !(filter_res->is_null() || 0 == filter_res->get_int());
-      }
     }
-  } else if (OB_UNLIKELY(0 != count)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else {
-    guard.set_batch_idx(0);
-    ObDatum &relevance_proj_datum = relevance_proj_expr->locate_datum_for_write(*eval_ctx);
-    relevance_proj_datum.set_double(relevance);
-    relevance_proj_expr->set_evaluated_projected(*eval_ctx);
   }
   return ret;
 }

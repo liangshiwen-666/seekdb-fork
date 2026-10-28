@@ -57,6 +57,10 @@ private:
   // TODO: if memory lifetime of docid datum is guaranteed by dim_iters, we can use pointer to datum directly
   //       and avoid deep copy into merge heap here
   const ObFixedArray<const ObDatum *, ObIAllocator> *iter_ids_;
+  // Domain ids of the inverted index are binary strings (CS_TYPE_BINARY); their
+  // order is exactly byte order, so the merge comparison does not need the
+  // generic collation compare function.
+  bool use_binary_memcmp_;
   bool is_inited_;
 };
 
