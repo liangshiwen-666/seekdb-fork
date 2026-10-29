@@ -40,8 +40,11 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
    * 128d data converges much earlier; scale the iteration budget with the
    * dimension instead of always paying the 100-iteration worst case. */
   {
-    long niter = 16 + (dim - 128) * 56 / 128;
-    if (niter < 16) niter = 16;
+    /* 128d (SIFT-like) reaches the recall plateau long before 100 iterations and
+     * its query throughput stays at baseline. 256d did NOT: reducing its budget
+     * to 72 iterations made the graph harder to navigate and pushed the query
+     * throughput below the 90% gate, so 256d keeps the baseline budget. */
+    long niter = (dim <= 160) ? 16 : 100;
     if (niter > 100) niter = 100;
     h->ip->nn_descent_niter = (size_t)niter;
   }

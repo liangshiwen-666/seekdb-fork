@@ -132,3 +132,33 @@ its worst-case 256d recall delta is -0.010, i.e. right at the 0.005 gate if the
 hidden dataset behaves like Gaussian noise. V2-safe's worst-case delta is
 -0.003, so it is the recommended submission if gate safety matters more than
 the last ~1.5 points.
+## 7. V3: keep the 256d budget at baseline after the first evaluation feedback
+
+The first evaluation (V0: 128d 32 / 256d 72 iterations) **passed every gate
+except `hidden250k:query_regression`**. The 256d iteration reduction made the
+CAGRA graph harder to navigate, so Hidden250K query throughput fell below the
+90%-of-baseline gate even though its recall gate passed.
+
+Consequence: for 256d, iteration reduction is not a viable speed lever at all;
+the query-throughput gate binds before the recall gate. V3 therefore keeps the
+256d budget at the baseline 100 iterations (graph quality identical to the
+baseline, so the query and recall gates are safe) and only reduces the 128d
+budget, where the official run showed the query gate holding up:
+
+```c
+long niter = (dim <= 160) ? 16 : 100;   /* 128d: 16, 256d: baseline */
+```
+
+Expected local numbers: 128d 48.3s -> 16.7s (2.90x), 256d unchanged (1.00x),
+weighted build speedup 2.90^0.4 = ~1.53x; the 256d side contributes no speedup
+but also carries no gate risk.
+
+Remaining levers for the 256d side, in order of preference, if a new instance is
+available for validation:
+
+1. `graph_degree` 192 with `intermediate_graph_degree` 384 at a reduced iteration
+   budget: a denser final graph is easier to navigate, so it may keep the query
+   throughput while still cutting build time (~1.2-1.25x measured for 40
+   iterations at degree 192 on the earlier instance).
+2. IVF-PQ graph build with `n_probes=256`: matches baseline recall but only
+   ~1.06x faster, and its navigability is unproven -> low value.
