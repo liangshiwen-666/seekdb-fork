@@ -162,3 +162,36 @@ available for validation:
    iterations at degree 192 on the earlier instance).
 2. IVF-PQ graph build with `n_probes=256`: matches baseline recall but only
    ~1.06x faster, and its navigability is unproven -> low value.
+## 8. V4: denser 256d graph (fixes the query-throughput regression in principle)
+
+The first evaluation (V0: 128d 32 / 256d 72 iterations on a 128-degree graph)
+passed every gate except `hidden250k:query_regression`: reducing refinement
+iterations made the 256d graph harder to navigate, so query throughput fell
+below the 90% gate while recall stayed fine.
+
+V4 keeps the fast 128d setting and changes the 256d graph shape instead of only
+cutting iterations: **degree 160 / intermediate degree 320 / 40 iterations**.
+A denser graph is easier to navigate (fewer hops) and refines each node better,
+so recall goes up while the build still finishes much earlier:
+
+| 250K x 256 (Hidden-difficulty proxy, interleaved A/B) | baseline | V4 |
+|---|---:|---:|
+| build | 51.3-58.2 s | 33.5-44.8 s (**~1.3-1.5x**) |
+| R@10 | 0.9588-0.9599 | 0.9758-0.9771 (**+0.017**) |
+| R@100 | 0.8915-0.8925 | 0.9232-0.9240 (**+0.032**) |
+| query throughput ratio | 1.00 | 0.94-0.96 (top-100), 0.79-0.96 (top-10, noisy) |
+
+| 250K x 128 clustered (SIFT-like, interleaved A/B) | baseline | V4 |
+|---|---:|---:|
+| build | 48.8-49.3 s | 17.2 s (**2.8-2.9x**) |
+| R@10 / R@100 | 0.9996 / 0.9999 | 0.9995 / 0.9999 (equal) |
+| query throughput ratio | 1.00 | 0.89-0.93 |
+
+Honest risk assessment: the local query ratios sit close to the 0.90 gate, and
+the official evaluation machine proved more sensitive than any local proxy
+(V0's 256d = degree 128 / 72 iterations failed `query_regression` there while
+every local proxy passed it). V4 is therefore a **probe submission**: the
+guaranteed-gate version is V3 (branch `amd-cagra-submit-v3`), which keeps the
+256d graph identical to the baseline.
+
+Expected weighted build speedup if the gates hold: ~1.7-1.9x.
