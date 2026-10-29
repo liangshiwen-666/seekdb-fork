@@ -10,7 +10,8 @@ of `634888d9b`):
 |---|---|---|---|
 | V0 (fallback) | `amd-cagra-submit-v0` | `niter = 32 + (dim-128)*40/128` (128d:32, 256d:72) | ~1.6x |
 | V1 (balanced) | `amd-cagra-submit-v1` | `niter = 20 + (dim-128)*36/128` (128d:20, 256d:56) | ~1.87x |
-| **V2 (this branch)** | `amd-cagra-submit` | `niter = 16 + (dim-128)*40/128` (128d:16, 256d:56) | **~2.01x** |
+| V2 | `amd-cagra-submit` | `niter = 16 + (dim-128)*40/128` (128d:16, 256d:56) | **~2.01x** |
+| **V2-safe (this branch)** | `amd-cagra-submit-v2-safe` | `niter = 16 + (dim-128)*56/128` (128d:16, 256d:72) | **~1.81x** |
 
 ## 1. Where the build time goes
 
@@ -112,3 +113,22 @@ python3 gen_data.py --n 250000 --dim 256 --nq 4096 --topk 100 --out data/h250k-x
 python3 bench_v5.py --data data/s250k-x128 --binary /path/to/seekdb \
   --bridge /path/to/bridge --port 2881 --tag v1 --nq 1024
 ```
+
+## 6. V2-safe fallback (256d = 72 iterations)
+
+Same 128d budget, but the 256d budget is raised back to 72 iterations. It trades
+~1.5 build points for a much larger recall/throughput margin on the harder
+hidden 256d dataset:
+
+| dataset | version | build | speedup | R@10 | R@100 | QPS ratio |
+|---|---|---:|---:|---:|---:|---:|
+| 250K x 256 clustered | V5 baseline | 52.14 s | 1.00x | 0.9998 | 0.9999 | 1.00 |
+| 250K x 256 clustered | V2-safe | 39.44 s | 1.32x | 0.9997 | 0.9999 | 0.973 / 0.975 |
+| 250K x 256 Gaussian (worst case) | V5 baseline | 53.33 s | 1.00x | 0.9511 | 0.8986 | 1.00 |
+| 250K x 256 Gaussian (worst case) | V2-safe | 38.04 s | 1.40x | 0.9487 (d -0.0024) | 0.8955 (d -0.0031) | >1.0 |
+
+V2 (56 iterations) keeps the same 128d behaviour and is ~1.5 points faster, but
+its worst-case 256d recall delta is -0.010, i.e. right at the 0.005 gate if the
+hidden dataset behaves like Gaussian noise. V2-safe's worst-case delta is
+-0.003, so it is the recommended submission if gate safety matters more than
+the last ~1.5 points.
