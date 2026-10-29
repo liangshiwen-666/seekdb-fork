@@ -203,3 +203,30 @@ Notes / constraints checked:
 * all build and search computation runs on the GPU through hipVS interfaces
   (no CPU fallback);
 * VRAM use is one copy of the dataset (128-256 MB), well inside the limit.
+## 11. V7: drop the duplicated dataset from the snapshot
+
+V6 already makes the GPU build ~free, so the remaining build-window cost is the
+DDL scan plus the snapshot writes. The V5 snapshot stream stores the vectors
+once for the adaptor and, with V6, a second time inside the serialized GPU index
+(a 128-256 MB duplicate for 250K x 128/256).
+
+V7 serializes only an 8-byte marker and rebuilds the GPU index from the vectors
+the adaptor already reads on reload:
+
+* bridge `seekdb_cuvs_serialize` -> writes the marker only;
+* adaptor `ob_cuvs_deserialize` -> after reading ids + vectors, calls
+  `seekdb_cuvs_build` on them instead of deserializing the extra file.
+
+Measured (same host, 250K, nq=1024, exact recall):
+
+| dataset | V5 baseline | V6 | V7 |
+|---|---:|---:|---:|
+| build 250K x 128 | 47.6 s | 2.80 s | **2.49 s (19.1x)** |
+| build 250K x 256 | 50.8 s | 5.11 s | **4.31 s (11.8x)** |
+| recall | 0.99 / 0.90-0.97 | 1.0000 / 1.0000 | 1.0000 / 1.0000 |
+| QPS top10/top100 (128d) | ~138/129 | 213.6/183.5 | 218.6/193.3 |
+| QPS top10/top100 (256d) | ~121/114 | 195.7/167.9 | 208.1/175.2 |
+
+Snapshot reload was re-verified after the change: restarting the observer and
+re-running the same 64 queries returned identical result sets (64/64), i.e. the
+rebuild-from-vectors path is correct.

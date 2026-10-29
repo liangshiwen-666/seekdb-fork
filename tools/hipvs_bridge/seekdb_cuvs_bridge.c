@@ -126,13 +126,17 @@ void seekdb_cuvs_free(void *handle)
 
 int seekdb_cuvs_serialize(void *handle, const char *filename)
 {
+  /* The adaptor already stores ids + vectors in the snapshot stream, so the
+   * index itself can be rebuilt from them on reload. Writing a tiny marker
+   * avoids duplicating the whole dataset inside the snapshot (V7). */
   sk_bf_index *h = (sk_bf_index *)handle;
   if (h == NULL || filename == NULL) return 1;
-  if (cuvsBruteForceSerialize(h->res, filename, h->idx) != CUVS_SUCCESS) {
-    fprintf(stderr, "[seekdb_cuvs] bf serialize failed: %s\n", cuvsGetLastErrorText());
-    return 1;
-  }
-  return 0;
+  FILE *f = fopen(filename, "wb");
+  if (f == NULL) return 1;
+  const char magic[8] = {'O', 'B', 'B', 'F', '0', '0', '0', '1'};
+  size_t written = fwrite(magic, 1, sizeof(magic), f);
+  fclose(f);
+  return written == sizeof(magic) ? 0 : 1;
 }
 
 void *seekdb_cuvs_deserialize(const char *filename, long n, long dim)

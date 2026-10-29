@@ -474,25 +474,28 @@ static int ob_cuvs_deserialize(void *key, int expected_dim, std::istream &in) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("[OBVSAG][cuVS] truncated snapshot payload", K(ret), KP(key), K(n64));
     } else {
-      ObCuvsSnapshotFile graph;
+      /* V7: the snapshot only carries a marker; rebuild the GPU index from the
+       * vectors that were just read (no dataset duplication in the snapshot). */
       std::vector<char> chunk(65536);
       uint64_t remaining = graph_bytes;
-      while (graph.file_ != nullptr && remaining > 0) {
+      while (remaining > 0) {
         const size_t bytes = std::min<uint64_t>(remaining, chunk.size());
-        if (!ob_cuvs_read(in, chunk.data(), bytes) || ::fwrite(chunk.data(), 1, bytes, graph.file_) != bytes) {
+        if (!ob_cuvs_read(in, chunk.data(), bytes)) {
           break;
         }
         remaining -= bytes;
       }
-      ObCuvsSnapshotJob job{graph.path_, nullptr, static_cast<long>(n), dim32, true, -1};
-      if (graph.file_ == nullptr || remaining != 0 || ::fflush(graph.file_) != 0 ||
-          !ob_cuvs_snapshot_big_stack(job)) {
+      std::shared_ptr<void> nb;
+      if (remaining == 0) {
+        nb = ob_cuvs_build_big_stack(ent->buf_vecs_.data(), static_cast<long>(n), dim32);
+      }
+      if (remaining != 0 || nb == nullptr) {
         delete ent;
         ret = OB_ERR_VSAG_RETURN_ERROR;
-        LOG_WARN("[OBVSAG][cuVS] failed to load CAGRA graph from snapshot", K(ret), KP(key), K(n64));
+        LOG_WARN("[OBVSAG][cuVS] failed to rebuild GPU index from snapshot", K(ret), KP(key), K(n64));
         return ret;
       }
-      ent->bridge_ = ob_cuvs_wrap(job.handle_);
+      ent->bridge_ = nb;
       ent->built_n_ = n;
       ent->ids_ = ent->buf_ids_;
       {
