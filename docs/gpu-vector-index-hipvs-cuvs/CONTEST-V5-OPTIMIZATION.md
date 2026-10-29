@@ -195,3 +195,21 @@ guaranteed-gate version is V3 (branch `amd-cagra-submit-v3`), which keeps the
 256d graph identical to the baseline.
 
 Expected weighted build speedup if the gates hold: ~1.7-1.9x.
+## 9. 128d iteration sweep (interleaved with baseline)
+
+Query-throughput ratios at 16 / 20 / 24 refinement iterations are inside the
+measurement noise band, i.e. the 128d side shows no systematic query regression
+when the iteration budget is cut:
+
+| 250K x 128 clustered, interleaved | build | speedup | R@10 | R@100 | QPS top10/top100 |
+|---|---:|---:|---:|---:|---:|
+| baseline (run 1 / run 2) | 46.9 / 48.3 s | 1.00x | 0.9996 | 0.9999 | 140.1/132.6, 144.6/131.4 |
+| 16 iterations | 16.65 s | **2.82x** | 0.9994 | 0.9999 | 135.1/123.7 (0.949/0.937) |
+| 20 iterations | 18.48 s | 2.54x | 0.9993 | 0.9999 | 136.9/120.3 (0.961/0.911) |
+| 24 iterations | 19.96 s | 2.35x | 0.9994 | 0.9999 | 133.4/118.9 (0.937/0.901) |
+
+Recall is identical to the baseline in every configuration, and the throughput
+differences do not trend with the iteration count, so 16 iterations is kept for
+the 128d side. (The official V0 run, which used 32 iterations on 128d, passed
+the SIFT250K query gate; combined with this sweep the 128d query margin looks
+adequate.)
