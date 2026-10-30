@@ -39,19 +39,18 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
    * ~18 s of the ~21.7 s total on the 24-core quota), not the GPU graph build. */
   h->ip->build_algo = NN_DESCENT;
   if (dim <= 160) {
-    /* 128d (SIFT-like): recall and query throughput are identical to the
-     * baseline already at 16 refinement iterations, and the build shrinks ~3.8x
-     * (22.3s -> 5.9s on the 24-core quota). */
+    /* 128d (SIFT-like): the clustered-data recall stays at the baseline level
+     * down to 12 refinement iterations, and the build shrinks ~4.2x. */
     h->ip->graph_degree = 128;
     h->ip->intermediate_graph_degree = 128;
-    h->ip->nn_descent_niter = 16;
+    h->ip->nn_descent_niter = 12;
   } else {
-    /* 256d: a denser graph (degree 160, intermediate degree 160) plus 48
-     * refinement iterations keeps recall at/above the baseline and query
-     * throughput at parity, while the build shrinks ~2.0x (25.3s -> 12.6s). */
+    /* 256d: denser graph (degree 160 / intermediate 160) with 32 refinement
+     * iterations: build ~2.4x faster, recall within a few thousandths of the
+     * baseline on every proxy, query throughput ~0.95 of baseline. */
     h->ip->graph_degree = 160;
     h->ip->intermediate_graph_degree = 160;
-    h->ip->nn_descent_niter = 48;
+    h->ip->nn_descent_niter = 32;
   }
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
